@@ -1,0 +1,57 @@
+# Project Agent Rules
+
+## Goal and current seam
+
+Build a native Windows port of Dead or Alive 2 Ultimate (Xbox), then replace
+generated game-owned logic with readable source. Read `CONTEXT.md` for scope
+and `docs/bring-up.md` before starting a game lift or runner.
+
+`recomp-runtime/` contains selected shared modules and synthetic tests.
+`recomp_lookup_manual()` is deliberately empty. Before enabling an adapter,
+verify the selected DOA2U executable identity, function address, calling
+convention and object layout. DOA3 and DOAXBV bindings are references only.
+
+Keep D3D8 device models callable as plain functions. Replace statically linked
+D3D8 at the API boundary and send semantic commands to a host presenter.
+Follow the sister projects' D3D11 presentation seam; do not build an NV2A
+emulator. Replace library code wholesale; decompile only game-owned logic.
+Document temporary seams beside their manual lookup.
+
+## Custody and disk use
+
+1. Never hand-edit generated C. Fix the pinned lifter and regenerate locally.
+2. Never commit an XBE, generated game C, retail bytes, extracted assets or
+   filenames, saves, BIOS data, private paths, or local run evidence.
+3. Keep all private inputs and output under `private/`; only its README is
+   tracked. New public files must be included in `public-export.json`.
+4. Report observed behavior; forced state remains a hypothesis.
+5. Keep the ISO in its original location and extract it only once. Use
+   hardlinks for play folders; do not copy disc trees or storage caches.
+6. Preserve imported discs, ISOs, play folders with saves, releases, and the
+   executable folder open in Ghidra. Remove task-owned scratch dumps when done.
+
+## Lifter and shared source
+
+`tools/xboxrecomp` is pinned to `6fec6e5020e00f385d359cbb818fa86edd86957f`
+on `NoRain211/xboxrecomp`'s `codex/doa3-recipe` line. This is an initial
+tooling baseline, not a validated DOA2U recipe. Use its upstream interfaces
+(`--manual-functions`, `--coalesce-functions`). Update its gitlink and the
+export manifest together. Do not vendor lifter source or generated output.
+
+Read `docs/reuse.md` before copying more sister-project code; take committed
+public source and preserve its notices. Neither sister runner's guest memory
+layout can be assumed safe for DOA2U.
+
+Host decisions remain in DOAXBV issues
+[#2](https://github.com/NoRain211/doaxbv-re/issues/2) (custody),
+[#6](https://github.com/NoRain211/doaxbv-re/issues/6) (semantic presenter), and
+[#8](https://github.com/NoRain211/doaxbv-re/issues/8) (audio and movie seams).
+Read the relevant decision before changing one of those boundaries.
+
+## Checks and Git
+
+Run the public checks in `README.md` before committing or pushing. Keep the
+diff scoped, preserve existing source style, and use LF for new text files.
+Use `type(scope): message` commit subjects under 72 characters.
+Publishing and merging require an explicit user request. This starter has
+no remote repository or issue tracker yet.

@@ -1,0 +1,17 @@
+Dead or Alive 2 Ultimate Native PC Port
+
+This repository contains project-authored source for interoperability and
+porting work. It does not distribute the game, generated game code, assets,
+console firmware, or other proprietary data.
+
+The initial shared runtime modules, their synthetic tests, extraction tools,
+and public export checker were copied from NoRain211/doa3-re at commit
+69cb910a13a737534fe2272cffd6211b1edf8d8e, under GPL-3.0-or-later. That runtime
+originated in the sister project NoRain211/doaxbv-re. Existing source notices
+are preserved. See docs/reuse.md for the scope of the reuse.
+
+The xboxrecomp submodule retains its own license and notices. The GPL license
+grants no rights to the game or third-party material.
+
+Dead or Alive, Xbox, and related names and marks belong to their respective
+owners. This project is not affiliated with or endorsed by those owners.

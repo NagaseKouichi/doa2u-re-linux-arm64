@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "license": "GPL-3.0-or-later",
+  "max_file_bytes": 262144,
+  "include": [
+    ".github/workflows/public-ci.yml",
+    ".gitattributes",
+    ".gitignore",
+    ".gitmodules",
+    "AGENTS.md",
+    "CONTEXT.md",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "public-export.json",
+    "docs/reuse.md",
+    "docs/bring-up.md",
+    "private/README.md",
+    "recomp-runtime/**",
+    "tools/extract_iso.py",
+    "tools/test_extract_iso.py",
+    "tools/public_export.py",
+    "tools/xbe_info.py",
+    "tools/xboxrecomp"
+  ],
+  "quarantine": [
+    "decomp/**",
+    "docs/**",
+    "patches/**",
+    "private/**",
+    "reference/**",
+    "scripts/**",
+    "specs/**",
+    "symbols/**",
+    "third_party/**",
+    "tools/**"
+  ],
+  "allowed_private_paths": [
+    "private/README.md"
+  ],
+  "gitlinks": [
+    {
+      "path": "tools/xboxrecomp",
+      "url": "https://github.com/NoRain211/xboxrecomp.git",
+      "commit": "6fec6e5020e00f385d359cbb818fa86edd86957f"
+    }
+  ],
+  "forbidden_extensions": [
+    ".xbe",
+    ".iso",
+    ".xiso",
+    ".img",
+    ".bin",
+    ".cue",
+    ".ppf",
+    ".afs",
+    ".xtf",
+    ".xpr",
+    ".xmv",
+    ".sfd",
+    ".wav",
+    ".wma",
+    ".mp3",
+    ".flac",
+    ".xbx",
+    ".qcow2",
+    ".sav",
+    ".jsonl"
+  ],
+  "byte_literal_exceptions": []
+}
