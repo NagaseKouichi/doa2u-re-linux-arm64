@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "host_diagnostics.h"
+#include "d3d8_adapter.h"
 #include "runner_load.h"
 #include "save_transaction.h"
 #include "xbox_memory_layout.h"
@@ -10,6 +11,7 @@ RecompFunction recomp_program_lookup(std::uint32_t address);
 }
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -75,8 +77,9 @@ int main(int argc, char **argv)
     const RecompMemoryRegion region = {0u, memory.size(), memory.data()};
     recomp_runtime_init(&region, 1u, nullptr, 0u, nullptr, 0u);
     recomp_runtime_set_lookup(recomp_program_lookup);
+    std::atexit(recomp_d3d8_shutdown);
     recomp_runtime.registers.esp = XBOX_STARTUP_STACK_TOP;
-    std::fprintf(stderr, "recomp runner: entry=0x%08x image_end=0x%08x kernel-only\n",
+    std::fprintf(stderr, "recomp runner: entry=0x%08x image_end=0x%08x native-d3d8\n",
         parsed.metadata.selectedEntryPoint, static_cast<unsigned>(imageEnd));
     recomp_watchdog_start();
     recomp_runtime.registers.esp -= 4u;

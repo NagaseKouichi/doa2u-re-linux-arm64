@@ -26,9 +26,17 @@ instead of patching a retail kernel PE or registering its INIT/LDT segment.
 The next bring-up pass also reused the core register runtime, kernel dispatch,
 files, memory, crypto, thread scheduler, stop reports and read-only XBE parser.
 The new loader and allocator reserve bootstrap state beyond the selected
-image. The runner has no sister-game startup hooks, library address bindings,
-graphics backend or audio host enabled. Additional MMX helper coverage is
-required by this lift rather than by a copied game-specific hook.
+image. The runner has no sister-game startup hooks or copied library address
+bindings. Additional MMX helper coverage is required by this lift rather
+than by a copied game-specific hook.
+
+The initial D3D8 adapter also reuses committed DOA3's semantic D3D11 backend,
+presenter worker/capture, vertex-program translation, draw/texture helpers and
+frame models. Its 5849 device, resource, viewport, tile, gamma and lighting
+bindings are separate. No DOA3/DOAXBV static device, surface address, push
+buffer or game-state hook is enabled. Capture and real presenter lifecycle
+tests cover the reused host; synthetic API tests cover the new guest layout.
+Audio and input hosts remain unbound.
 
 ## Good next candidates, with work required
 

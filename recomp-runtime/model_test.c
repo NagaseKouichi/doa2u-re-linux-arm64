@@ -7,6 +7,8 @@ int recomp_directory_model_test(void);
 int recomp_symbolic_link_model_test(void);
 int recomp_cri_service_model_test(void);
 int recomp_d3d_frame_model_test(void);
+int recomp_d3d_device_model_test(void);
+int recomp_d3d_tile_model_test(void);
 
 int main(void)
 {
@@ -18,5 +20,7 @@ int main(void)
     passed &= recomp_symbolic_link_model_test();
     passed &= recomp_cri_service_model_test();
     passed &= recomp_d3d_frame_model_test();
+    passed &= recomp_d3d_device_model_test();
+    passed &= recomp_d3d_tile_model_test();
     return passed ? 0 : 1;
 }

@@ -20,15 +20,18 @@ The main executable records XDK, D3D8 and DirectSound build 5849. DOA3 uses
 3911/3925/3936 and DOAXBV uses 4928, so their library address bindings cannot
 be reused unchanged.
 
-The whole-program lift and a kernel-only native runner are in place. The
-runtime loads the selected executable, binds kernel imports, initializes TLS,
-and schedules guest threads. Graphics, audio and input API adapters are not
-enabled yet. Passing synthetic tests does not establish rendering, sound or
-gameplay compatibility.
+The whole-program lift and native runner are in place. The runtime loads the
+selected executable, binds kernel imports, initializes TLS and schedules
+guest threads. The initial D3D8 5849 adapter creates a native D3D11 device and
+handles framebuffer headers, viewport, tiles, clear, swap, gamma, transforms,
+point/directional lights and fog state. It reuses the sister projects'
+semantic presenter.
 
-The runner stops explicitly at `d3d8:create-device-unbound` until the 5849
-native device/presenter adapter is implemented. It does not report a created
-device or attempt to emulate the GPU registers below that API.
+The graphics adapter supports the verified 720x480 startup mode. Additional
+resources, shaders and draw bindings remain work, as do audio and input.
+DirectSound creation stops explicitly at `dsound:create-device-unbound`.
+Passing synthetic tests does not establish title-screen or gameplay
+compatibility.
 
 Read [reuse](docs/reuse.md) for the source provenance and what can be brought
 over next, and [bring-up](docs/bring-up.md) for the next implementation steps.
@@ -82,7 +85,7 @@ preserves its saves, and reports a timeout as termination of the probe.
 
 | Path | Purpose |
 | --- | --- |
-| `recomp-runtime/` | Selected shared source, synthetic tests, empty manual lookup |
+| `recomp-runtime/` | Shared runtime, D3D11 presenter, verified adapters and synthetic tests |
 | `tools/` | Disc import, XBE inspection and public custody checks |
 | `tools/xboxrecomp` | Pinned lifter submodule; no generated game output |
 | `docs/` | Reuse assessment and bring-up plan |

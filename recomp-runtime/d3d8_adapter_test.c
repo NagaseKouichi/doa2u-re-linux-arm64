@@ -1,0 +1,431 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "d3d8_adapter.h"
+#include "d3d_device_model.h"
+#include "d3d_frame_model.h"
+#include "d3d_tile_model.h"
+#include "d3d_vblank.h"
+#include "stop_report.h"
+
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+enum {
+    MEMORY_SIZE = 8u * 1024u * 1024u,
+    PARAMETERS = 0x1000u,
+    OUTPUT = 0x1800u,
+    VIEWPORT_OUTPUT = 0x1900u,
+    TILE_SOURCE = 0x1a00u,
+    COLOR_SOURCE = 0x2000u,
+    DEPTH_SOURCE = 0x2200u,
+    ENTRY_ESP = 0x8000u,
+    DEVICE_GLOBAL = 0x3554f8u,
+    DEVICE = 0x355500u,
+    DEVICE_SIZE = 0x24a0u,
+    COLOR_HEADER = DEVICE + 0x1a24u,
+    DEPTH_HEADER = DEVICE + 0x1a6cu,
+    EAX_SENTINEL = 0xa5a5a5a5u,
+};
+
+RecompRuntime recomp_runtime;
+uint8_t *recomp_fast_ram = NULL;
+
+struct RecompD3dPresenter {
+    bool active;
+};
+
+static uint32_t memory[MEMORY_SIZE / 4u];
+static unsigned char saved_device[DEVICE_SIZE];
+static struct RecompD3dPresenter mock_presenter;
+static RecompD3dPresenterConfig created_config;
+static RecompD3dPresenterCommand submitted;
+static RecompD3dPresenterError create_error;
+static RecompD3dPresenterError submit_error;
+static uint32_t create_count, submit_count, destroy_count;
+static uint32_t vblank_reset_count, wait_present_count;
+static jmp_buf stop_environment;
+static bool stop_armed;
+static int stop_code;
+static char stop_reason[128];
+
+void recomp_stop(int fallback_code, const char *format, ...)
+{
+    va_list args;
+
+    stop_code = fallback_code;
+    va_start(args, format);
+    vsnprintf(stop_reason, sizeof stop_reason, format, args);
+    va_end(args);
+    if (stop_armed) {
+        longjmp(stop_environment, 1);
+    }
+    fprintf(stderr, "D3D adapter: unexpected stop %s\n", stop_reason);
+    abort();
+}
+
+uint8_t *recomp_memory(uint32_t address, size_t width)
+{
+    const uint32_t window = address & ~(RECOMP_XBOX_RAM_SIZE - 1u);
+    const uint32_t offset = address & (RECOMP_XBOX_RAM_SIZE - 1u);
+
+    if ((window != 0u && window != RECOMP_XBOX_CACHED_ALIAS &&
+         window != RECOMP_XBOX_PHYSICAL_ALIAS) ||
+        offset > MEMORY_SIZE || width > MEMORY_SIZE - offset) {
+        recomp_stop(2, "memory:0x%08x", address);
+    }
+    return (uint8_t *)(void *)memory + offset;
+}
+
+uint32_t *recomp_memory_u32_checked(uint32_t address)
+{
+    return (uint32_t *)(void *)recomp_memory(address, 4u);
+}
+
+RecompD3dPresenterError recomp_d3d_presenter_create(
+    const RecompD3dPresenterConfig *config,
+    RecompD3dPresenter **presenter)
+{
+    ++create_count;
+    created_config = *config;
+    if (create_error != RECOMP_D3D_PRESENTER_OK) {
+        *presenter = NULL;
+        return create_error;
+    }
+    mock_presenter.active = true;
+    *presenter = &mock_presenter;
+    return RECOMP_D3D_PRESENTER_OK;
+}
+
+RecompD3dPresenterError recomp_d3d_presenter_submit(
+    RecompD3dPresenter *presenter,
+    const RecompD3dPresenterCommand *command)
+{
+    if (presenter != &mock_presenter || !presenter->active) {
+        return RECOMP_D3D_PRESENTER_NOT_INITIALIZED;
+    }
+    ++submit_count;
+    submitted = *command;
+    return submit_error;
+}
+
+RecompD3dPresenterError recomp_d3d_presenter_destroy(
+    RecompD3dPresenter **presenter)
+{
+    ++destroy_count;
+    mock_presenter.active = false;
+    *presenter = NULL;
+    return RECOMP_D3D_PRESENTER_OK;
+}
+
+void recomp_d3d_vblank_reset(void)
+{
+    ++vblank_reset_count;
+}
+
+void recomp_d3d_wait_present(void)
+{
+    ++wait_present_count;
+}
+
+static int expect(const char *name, bool condition)
+{
+    if (!condition) {
+        fprintf(stderr, "D3D adapter: %s failed\n", name);
+        return 0;
+    }
+    return 1;
+}
+
+static int call(
+    uint32_t address,
+    const uint32_t *arguments,
+    size_t argument_count,
+    const char *expected_stop)
+{
+    RecompFunction function = recomp_d3d8_lookup_manual(address);
+    uint32_t *stack = recomp_memory_u32(ENTRY_ESP);
+
+    if (function == NULL) {
+        fprintf(stderr, "D3D adapter: lookup 0x%08x failed\n", address);
+        return 0;
+    }
+    stack[0] = 0x10101010u;
+    if (argument_count != 0u) {
+        memcpy(stack + 1u, arguments, argument_count * 4u);
+    }
+    recomp_runtime.registers = (RecompRegisters){
+        .eax = EAX_SENTINEL, .ebx = 0x12345678u, .esi = 0x87654321u,
+        .edi = 0xabcdef01u, .ebp = 0x10203040u, .esp = ENTRY_ESP,
+    };
+    stop_reason[0] = '\0';
+    stop_armed = true;
+    if (setjmp(stop_environment) == 0) {
+        function();
+        stop_armed = false;
+        return expect("call returned as expected", expected_stop == NULL);
+    }
+    stop_armed = false;
+    return expect("expected fail-loud boundary",
+        expected_stop != NULL && stop_code == 2 &&
+        strncmp(stop_reason, expected_stop, strlen(expected_stop)) == 0);
+}
+
+static void reset_fixture(void)
+{
+    const RecompD3dPresentationParameters presentation = {
+        .back_buffer_width = 720u, .back_buffer_height = 480u,
+        .back_buffer_format = 0x12u, .back_buffer_count = 1u,
+        .multi_sample_type = 0x11u, .swap_effect = 1u,
+        .enable_auto_depth_stencil = 1u, .auto_depth_stencil_format = 0x2eu,
+        .full_screen_presentation_interval = 0x80000001u,
+        .buffer_surfaces = {COLOR_SOURCE, COLOR_SOURCE + 0x18u, 0u},
+        .depth_stencil_surface = DEPTH_SOURCE,
+    };
+    const RecompD3dSurfaceHeader colors[2] = {
+        {0x50001u, 0x100000u, 0u, 0x11229u, 0x2f1df2cfu, 0u},
+        {0x50001u, 0x400000u, 0u, 0x11229u, 0x2f1df2cfu, 0u},
+    };
+    const RecompD3dSurfaceHeader depth = {
+        0x50001u, 0x600000u, 0u, 0x12e29u, 0x2f1df2cfu, 0u,
+    };
+
+    recomp_d3d8_shutdown();
+    memset(memory, 0, sizeof memory);
+    memset(&recomp_runtime, 0, sizeof recomp_runtime);
+    create_count = submit_count = destroy_count = 0u;
+    vblank_reset_count = wait_present_count = 0u;
+    create_error = submit_error = RECOMP_D3D_PRESENTER_OK;
+    memcpy(recomp_memory(PARAMETERS, sizeof presentation), &presentation,
+        sizeof presentation);
+    memcpy(recomp_memory(COLOR_SOURCE, sizeof colors), colors, sizeof colors);
+    memcpy(recomp_memory(DEPTH_SOURCE, sizeof depth), &depth, sizeof depth);
+    memset(recomp_memory(DEVICE, DEVICE_SIZE), 0xa5, DEVICE_SIZE);
+    memcpy(saved_device, recomp_memory(DEVICE, DEVICE_SIZE), DEVICE_SIZE);
+    *recomp_memory_u32(OUTPUT) = EAX_SENTINEL;
+}
+
+static int create(void)
+{
+    const uint32_t arguments[] = {0u, 1u, 0u, 0x40u, PARAMETERS, OUTPUT};
+    return call(0x34a470u, arguments, 6u, NULL);
+}
+
+int main(void)
+{
+    uint32_t arguments[6] = {0};
+    RecompD3dSurfaceHeader before[2], after[2];
+    RecompD3dViewport viewport;
+    RecompD3dTile tile = {{1u, 0x1000u, 3u, 4u, 5u, 6u}};
+    uint32_t prior_submits;
+    int passed = 1;
+
+    passed &= expect("unbound SDK and sister addresses stay unbound",
+        recomp_d3d8_lookup_manual(0u) == NULL &&
+        recomp_d3d8_lookup_manual(0x34a471u) == NULL &&
+        recomp_d3d8_lookup_manual(0x1e4930u) == NULL);
+    reset_fixture();
+    create_error = RECOMP_D3D_PRESENTER_OUT_OF_MEMORY;
+    passed &= create();
+    passed &= expect("host allocation failure preserves guest device",
+        recomp_runtime.registers.eax == RECOMP_D3D_OUT_OF_MEMORY &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 28u &&
+        *recomp_memory_u32(OUTPUT) == 0u &&
+        *recomp_memory_u32(DEVICE_GLOBAL) == 0u && create_count == 1u &&
+        submit_count == 0u && vblank_reset_count == 0u &&
+        memcmp(saved_device, recomp_memory(DEVICE, DEVICE_SIZE), DEVICE_SIZE) == 0);
+    create_error = RECOMP_D3D_PRESENTER_HOST_FAILURE;
+    passed &= create();
+    passed &= expect("host failure returns HRESULT",
+        recomp_runtime.registers.eax == RECOMP_D3D_FAIL &&
+        *recomp_memory_u32(OUTPUT) == 0u &&
+        *recomp_memory_u32(DEVICE_GLOBAL) == 0u);
+    arguments[1] = 1u;
+    arguments[3] = 0x40u;
+    arguments[5] = OUTPUT;
+    passed &= call(0x34a470u, arguments, 6u, NULL);
+    passed &= expect("null presentation rejects with HRESULT",
+        recomp_runtime.registers.eax == RECOMP_D3D_INVALID_CALL &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 28u &&
+        *recomp_memory_u32(OUTPUT) == 0u);
+    arguments[4] = PARAMETERS;
+    *recomp_memory_u32(PARAMETERS) = 640u;
+    passed &= call(0x34a470u, arguments, 6u, "d3d8:create-device-request");
+    passed &= expect("unsupported request does not publish or mutate device",
+        *recomp_memory_u32(OUTPUT) == 0u &&
+        *recomp_memory_u32(DEVICE_GLOBAL) == 0u &&
+        memcmp(saved_device, recomp_memory(DEVICE, DEVICE_SIZE), DEVICE_SIZE) == 0);
+    reset_fixture();
+    passed &= create();
+    passed &= expect("creation ABI and presenter configuration",
+        recomp_runtime.registers.eax == RECOMP_D3D_OK &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 28u &&
+        recomp_runtime.registers.ebx == 0x12345678u &&
+        *recomp_memory_u32(OUTPUT) == DEVICE &&
+        *recomp_memory_u32(DEVICE_GLOBAL) == DEVICE &&
+        created_config.width == 720u && created_config.height == 480u &&
+        created_config.color_format == RECOMP_D3D_PRESENTER_COLOR_FORMAT_BGRA8_UNORM &&
+        created_config.depth_format == RECOMP_D3D_PRESENTER_DEPTH_FORMAT_D24S8 &&
+        create_count == 1u && submit_count == 1u && vblank_reset_count == 1u &&
+        submitted.type == RECOMP_D3D_PRESENTER_COMMAND_CLEAR &&
+        !submitted.data.clear.clear_color && submitted.data.clear.clear_depth &&
+        submitted.data.clear.clear_stencil);
+    passed &= expect("verified surface pointer layout",
+        *recomp_memory_u32(DEVICE + 0x1a04u) == COLOR_HEADER &&
+        *recomp_memory_u32(DEVICE + 0x1a08u) == DEPTH_HEADER &&
+        *recomp_memory_u32(DEVICE + 0x1a10u) == 2u &&
+        *recomp_memory_u32(DEVICE + 0x1a14u) == COLOR_HEADER &&
+        *recomp_memory_u32(DEVICE + 0x1a18u) == COLOR_HEADER + 0x18u &&
+        *recomp_memory_u32(DEVICE + 0x1a1cu) == 0u &&
+        *recomp_memory_u32(DEVICE + 0x1a20u) == DEPTH_HEADER &&
+        *recomp_memory_u32(COLOR_HEADER) == 0xd0002u &&
+        *recomp_memory_u32(COLOR_HEADER + 0x18u) == 0x50002u &&
+        *recomp_memory_u32(DEPTH_HEADER) == 0xd0002u &&
+        *recomp_memory_u32(COLOR_SOURCE) == 0x50001u);
+    memcpy(&viewport, recomp_memory(DEVICE + 0xee0u, sizeof viewport), sizeof viewport);
+    for (uint32_t bank = 0u; bank < 2u; ++bank) {
+        const uint8_t *ramp = recomp_memory(DEVICE + 0x1e04u + bank * 0x300u, 0x300u);
+        for (uint32_t plane = 0u; plane < 3u; ++plane) {
+            for (uint32_t i = 0u; i < 256u; ++i) {
+                passed &= expect("initial gamma identity", ramp[plane * 256u + i] == i);
+            }
+        }
+    }
+    passed &= expect("initial gamma bank pending and completion",
+        *recomp_memory_u32(DEVICE + 0x2404u) == 1u &&
+        *recomp_memory_u32(DEVICE + 0x2408u) == 0u &&
+        *recomp_memory_u32(DEVICE + 0x240cu) == 0u &&
+        *recomp_memory_u32(DEVICE + 0x1de4u) == 0u);
+    passed &= expect("initial guest viewport and scales",
+        viewport.x == 0u && viewport.y == 0u && viewport.width == 720u &&
+        viewport.height == 480u && viewport.min_z == 0.0f && viewport.max_z == 1.0f &&
+        *recomp_memory_u32(DEVICE + 0x954u) == 720u &&
+        *recomp_memory_u32(DEVICE + 0x958u) == 480u &&
+        *recomp_memory_u32(DEVICE + 0x95cu) == 0x3f800000u &&
+        *recomp_memory_u32(DEVICE + 0x96cu) == 0x3f800000u);
+    arguments[0] = 0u;
+    passed &= call(0x344a50u, arguments, 1u, NULL);
+    passed &= expect("back buffer getter adds reference and retires argument",
+        recomp_runtime.registers.eax == COLOR_HEADER &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 8u &&
+        *recomp_memory_u32(COLOR_HEADER) == 0xd0003u);
+    arguments[0] = COLOR_HEADER;
+    passed &= call(0x347ec0u, arguments, 1u, NULL);
+    passed &= expect("back buffer release stays stable",
+        recomp_runtime.registers.eax == 2u &&
+        *recomp_memory_u32(COLOR_HEADER) == 0xd0002u);
+    arguments[0] = UINT32_MAX;
+    passed &= call(0x344a50u, arguments, 1u, NULL);
+    passed &= expect("minus one resolves front buffer",
+        recomp_runtime.registers.eax == COLOR_HEADER + 0x18u &&
+        *recomp_memory_u32(COLOR_HEADER + 0x18u) == 0x50003u);
+    arguments[0] = COLOR_HEADER + 0x18u;
+    passed &= call(0x347ec0u, arguments, 1u, NULL);
+    arguments[0] = COLOR_HEADER;
+    passed &= call(0x347e80u, arguments, 1u, NULL);
+    passed &= expect("explicit AddRef returns count", recomp_runtime.registers.eax == 3u);
+    passed &= call(0x347ec0u, arguments, 1u, NULL);
+    passed &= call(0x344df0u, NULL, 0u, NULL);
+    passed &= expect("depth getter no-argument ABI",
+        recomp_runtime.registers.eax == DEPTH_HEADER &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 4u &&
+        *recomp_memory_u32(DEPTH_HEADER) == 0xd0003u);
+    arguments[0] = DEPTH_HEADER;
+    passed &= call(0x347ec0u, arguments, 1u, NULL);
+    arguments[0] = VIEWPORT_OUTPUT;
+    passed &= call(0x344360u, arguments, 1u, NULL);
+    passed &= expect("viewport getter void ABI",
+        recomp_runtime.registers.eax == EAX_SENTINEL &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 8u &&
+        memcmp(recomp_memory(VIEWPORT_OUTPUT, sizeof viewport), &viewport, sizeof viewport) == 0);
+    viewport = (RecompD3dViewport){700u, 460u, UINT32_MAX, UINT32_MAX, 0.0f, 1.0f};
+    memcpy(recomp_memory(VIEWPORT_OUTPUT, sizeof viewport), &viewport, sizeof viewport);
+    passed &= call(0x344e10u, arguments, 1u, NULL);
+    passed &= expect("viewport setter clamps extent",
+        *recomp_memory_u32(DEVICE + 0xee0u) == 700u &&
+        *recomp_memory_u32(DEVICE + 0xee8u) == 20u &&
+        *recomp_memory_u32(DEVICE + 0xeecu) == 20u);
+    arguments[0] = 0u; arguments[1] = 0u;
+    arguments[2] = 0xf3u; arguments[3] = 0x10203040u;
+    arguments[4] = 0x3f800000u; arguments[5] = 0u;
+    passed &= call(0x347920u, arguments, 6u, "d3d8:clear-viewport-unbound");
+    arguments[0] = COLOR_HEADER; arguments[1] = 0u;
+    passed &= call(0x3447d0u, arguments, 2u, NULL);
+    passed &= expect("render target removes depth binding and resets viewport",
+        *recomp_memory_u32(DEVICE + 0x1a08u) == 0u &&
+        *recomp_memory_u32(DEPTH_HEADER) == 0x50002u &&
+        *recomp_memory_u32(DEVICE + 0xee8u) == 720u);
+    arguments[0] = 0u; arguments[1] = 0u;
+    passed &= call(0x347920u, arguments, 6u, NULL);
+    passed &= expect("clear without depth submits only color",
+        submitted.data.clear.clear_color && !submitted.data.clear.clear_depth &&
+        !submitted.data.clear.clear_stencil && submitted.data.clear.target.no_depth);
+    arguments[0] = 0u; arguments[1] = DEPTH_HEADER;
+    passed &= call(0x3447d0u, arguments, 2u, NULL);
+    passed &= expect("render target restores depth binding",
+        *recomp_memory_u32(DEVICE + 0x1a08u) == DEPTH_HEADER &&
+        *recomp_memory_u32(DEPTH_HEADER) == 0xd0002u &&
+        recomp_runtime.registers.eax == EAX_SENTINEL &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 12u);
+    arguments[0] = 0u; arguments[1] = 0u;
+    passed &= call(0x347920u, arguments, 6u, NULL);
+    passed &= expect("six-argument clear preserves void return and submits semantic values",
+        recomp_runtime.registers.esp == ENTRY_ESP + 28u &&
+        recomp_runtime.registers.eax == EAX_SENTINEL &&
+        submitted.type == RECOMP_D3D_PRESENTER_COMMAND_CLEAR &&
+        submitted.data.clear.clear_color && submitted.data.clear.clear_depth &&
+        submitted.data.clear.clear_stencil && submitted.data.clear.color == 0x10203040u &&
+        submitted.data.clear.z == 1.0f && submitted.data.clear.stencil == 0u);
+    memcpy(recomp_memory(TILE_SOURCE, sizeof tile), &tile, sizeof tile);
+    arguments[0] = 7u; arguments[1] = TILE_SOURCE;
+    passed &= call(0x3459e0u, arguments, 2u, NULL);
+    passed &= expect("tile setter normalizes six DWORDs and retires two arguments",
+        recomp_runtime.registers.eax == EAX_SENTINEL &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 12u &&
+        *recomp_memory_u32(DEVICE + 0x1ac0u + 7u * 0x18u) == 1u &&
+        *recomp_memory_u32(DEVICE + 0x1ac0u + 7u * 0x18u + 16u) == 0u);
+    arguments[1] = 0u;
+    passed &= call(0x3459e0u, arguments, 2u, NULL);
+    passed &= expect("null tile clears entry",
+        *recomp_memory_u32(DEVICE + 0x1ac0u + 7u * 0x18u) == 0u);
+    arguments[0] = 8u;
+    passed &= call(0x3459e0u, arguments, 2u, "d3d8:tile-index");
+    *recomp_memory_u32(COLOR_HEADER + 8u) = 0x11111111u;
+    *recomp_memory_u32(COLOR_HEADER + 0x18u + 8u) = 0x22222222u;
+    memcpy(before, recomp_memory(COLOR_HEADER, sizeof before), sizeof before);
+    *recomp_memory_u32(DEVICE + 0x2408u) = 1u;
+    arguments[0] = 0u;
+    passed &= call(0x34af80u, arguments, 1u, NULL);
+    memcpy(after, recomp_memory(COLOR_HEADER, sizeof after), sizeof after);
+    passed &= expect("swap ABI, counter, pacing and physical storage rotation",
+        recomp_runtime.registers.eax == 1u &&
+        recomp_runtime.registers.esp == ENTRY_ESP + 8u &&
+        *recomp_memory_u32(DEVICE + 0x2478u) == 1u && wait_present_count == 1u &&
+        submitted.type == RECOMP_D3D_PRESENTER_COMMAND_PRESENT &&
+        submitted.data.present.effective_flags == 5u &&
+        submitted.data.present.swap_counter == 1u &&
+        after[0].data == before[1].data && after[1].data == before[0].data &&
+        after[0].lock == before[1].lock && after[1].lock == before[0].lock &&
+        after[0].common == before[0].common && after[1].common == before[1].common);
+    arguments[0] = 1u;
+    prior_submits = submit_count;
+    passed &= call(0x34af80u, arguments, 1u, "d3d8:swap");
+    passed &= expect("unsupported swap has no presenter or guest counter effect",
+        submit_count == prior_submits && *recomp_memory_u32(DEVICE + 0x2478u) == 1u);
+    passed &= expect("first swap consumes only bank zero",
+        *recomp_memory_u32(DEVICE + 0x2404u) == 0u &&
+        *recomp_memory_u32(DEVICE + 0x2408u) == 1u &&
+        *recomp_memory_u32(DEVICE + 0x1de4u) == 1u);
+    arguments[0] = 0u;
+    passed &= call(0x34af80u, arguments, 1u, NULL);
+    passed &= expect("second swap consumes bank one",
+        *recomp_memory_u32(DEVICE + 0x2408u) == 0u &&
+        *recomp_memory_u32(DEVICE + 0x1de4u) == 2u &&
+        recomp_runtime.registers.eax == 2u);
+    recomp_d3d8_shutdown();
+    passed &= expect("shutdown destroys presenter once", destroy_count == 1u);
+    recomp_d3d8_shutdown();
+    passed &= expect("repeated shutdown is safe", destroy_count == 1u);
+    return passed ? 0 : 1;
+}

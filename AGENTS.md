@@ -7,8 +7,10 @@ generated game-owned logic with readable source. Read `CONTEXT.md` for scope
 and `docs/bring-up.md` before starting a game lift or runner.
 
 `recomp-runtime/` contains the shared core, kernel host, runner and synthetic
-tests. `recomp_lookup_manual()` has a verified XAPI kernel-lifetime seam.
-Its D3D8 creation entry stops explicitly until the host adapter exists.
+tests. `recomp_lookup_manual()` binds XAPI kernel lifetime and the initial
+D3D8 5849 device, frame and state APIs to the shared D3D11 presenter.
+DirectSound creation stops at `dsound:create-device-unbound`.
+Read the graphics limits in `docs/bring-up.md` before extending this adapter.
 Before enabling another adapter,
 verify the selected DOA2U executable identity, function address, calling
 convention and object layout. DOA3 and DOAXBV bindings are references only.

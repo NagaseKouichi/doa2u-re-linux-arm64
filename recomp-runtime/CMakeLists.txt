@@ -19,11 +19,28 @@ add_executable(recomp_model_test
     directory_model.c directory_model_test.c
     symbolic_link_model.c symbolic_link_model_test.c
     cri_service_model.c cri_service_model_test.c
-    d3d_frame_model.c d3d_frame_model_test.c)
+    d3d_frame_model.c d3d_frame_model_test.c
+    d3d_device_model.c d3d_device_model_test.c
+    d3d_tile_model.c d3d_tile_model_test.c)
 add_test(NAME recomp-runtime-models COMMAND recomp_model_test)
 
 add_executable(recomp_manual_test program_manual.c program_manual_test.c)
 add_test(NAME recomp-runtime-unbound-lookups COMMAND recomp_manual_test)
+
+add_executable(recomp_d3d8_adapter_test d3d8_adapter.c d3d8_adapter_test.c
+    d3d_device_model.c d3d_frame_model.c d3d_tile_model.c)
+add_test(NAME recomp-runtime-d3d8-adapter COMMAND recomp_d3d8_adapter_test)
+
+add_executable(recomp_d3d8_state_test d3d8_state_adapter.c d3d8_state_adapter_test.c d3d_light_model.c)
+add_test(NAME recomp-runtime-d3d8-state COMMAND recomp_d3d8_state_test)
+add_executable(recomp_d3d_light_test d3d_light_model.c d3d_light_model_test.c)
+add_test(NAME recomp-runtime-d3d-light COMMAND recomp_d3d_light_test)
+if(NOT MSVC)
+    target_link_libraries(recomp_model_test PRIVATE m)
+    target_link_libraries(recomp_d3d8_adapter_test PRIVATE m)
+    target_link_libraries(recomp_d3d8_state_test PRIVATE m)
+    target_link_libraries(recomp_d3d_light_test PRIVATE m)
+endif()
 
 add_executable(recomp_xbox_adpcm_test xbox_adpcm.c xbox_adpcm_test.c)
 add_test(NAME recomp-runtime-xbox-adpcm COMMAND recomp_xbox_adpcm_test)
@@ -52,6 +69,17 @@ if(WIN32)
     add_test(NAME recomp-runtime-d3d-vblank COMMAND recomp_d3d_vblank_test)
     add_test(NAME recomp-runtime-unpaced COMMAND "${CMAKE_COMMAND}" -E env
         RECOMP_UNPACED=1 "$<TARGET_FILE:recomp_d3d_vblank_test>")
+    add_library(recomp_d3d_presenter STATIC
+        d3d_presenter_d3d11.cpp d3d_presenter_thread.cpp d3d_presenter_capture.cpp
+        d3d_vertex_program.cpp d3d_draw_model.c d3d_texture_model.c d3d_vblank.cpp)
+    target_include_directories(recomp_d3d_presenter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(recomp_d3d_presenter PUBLIC d3d11 d3dcompiler dxgi user32)
+    add_executable(recomp_d3d_capture_test d3d_presenter_capture_test.cpp d3d_presenter_capture.cpp)
+    add_test(NAME recomp-runtime-d3d-capture COMMAND recomp_d3d_capture_test)
+    add_executable(recomp_d3d_presenter_test d3d_presenter_thread_test.cpp xapi_clock.cpp)
+    target_link_libraries(recomp_d3d_presenter_test PRIVATE recomp_d3d_presenter)
+    add_test(NAME recomp-runtime-d3d-presenter COMMAND recomp_d3d_presenter_test)
+    set_tests_properties(recomp-runtime-d3d-presenter PROPERTIES TIMEOUT 30)
 endif()
 
 add_executable(recomp_program_abi_call_test program_abi_call_test.c)
@@ -187,11 +215,13 @@ if(RECOMP_PROGRAM_DIR)
     endforeach()
     message(STATUS "Generated ${_missing_count} fail-loud stubs for absent snapshot bodies")
     add_executable(recomp_program_runner runner.cpp program_adapters.c program_manual.c
+        d3d8_adapter.c d3d8_state_adapter.c d3d_device_model.c d3d_light_model.c
+        d3d_frame_model.c d3d_tile_model.c
         host_diagnostics.cpp "${_missing_source}" ${_program_sources})
     target_compile_definitions(recomp_program_runner PRIVATE RECOMP_XBE_SHA256="${_xbe_sha256}")
     if(MSVC)
         target_compile_options(recomp_program_runner PRIVATE /we4013)
     endif()
-    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe dbghelp)
+    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe recomp_d3d_presenter dbghelp)
     target_include_directories(recomp_program_runner PRIVATE "${_derived_dir}")
 endif()
