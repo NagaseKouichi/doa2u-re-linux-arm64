@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <xaudio2.h>
+#include <xaudio2fx.h>
 
 #include <atomic>
 #include <cmath>
@@ -33,11 +34,17 @@ struct PcmBuffer {
 
 struct OutputVoice {
     IXAudio2SourceVoice *source;
+    bool sends_reverb;
     PcmBuffer buffers[kQueueSize];
     uint32_t sample_rate, channels, bits_per_sample;
     uint32_t front, queued;
     uint64_t bytes_submitted;
     float level_ms;
+};
+
+struct VoiceRouting {
+    uint32_t channels;
+    float dry[4], wet[4];
 };
 
 std::atomic<HRESULT> critical_error{S_OK};
@@ -54,13 +61,16 @@ struct EngineCallback : IXAudio2EngineCallback {
 EngineCallback callback;
 IXAudio2 *engine;
 IXAudio2MasteringVoice *master;
+IXAudio2SubmixVoice *reverb_voice;
 OutputVoice voices[kVoiceCount];
+VoiceRouting routing[kVoiceCount];
 bool reported_nonzero[kVoiceCount];
 bool attempted, com_initialized, callback_registered, summary_printed, muted;
 /* Initialized COM; only this thread may release it. */
 std::atomic<DWORD> owner_thread{0};
 unsigned long long submitted_buffers, submitted_bytes, nonzero_buffers;
 unsigned long long dropped_buffers, underruns;
+unsigned long long reverb_updates, routing_updates;
 unsigned engine_glitches;
 
 void destroyVoice(OutputVoice &voice)
@@ -74,6 +84,9 @@ void destroyVoice(OutputVoice &voice)
 void releaseOutput()
 {
     for (auto &voice : voices) destroyVoice(voice);
+    if (reverb_voice) reverb_voice->DestroyVoice();
+    reverb_voice = nullptr;
+    std::memset(routing, 0, sizeof routing);
     if (master) master->DestroyVoice();
     recomp_audio_capture_save();
     master = nullptr;
@@ -120,6 +133,34 @@ void dropBuffer(uint32_t slot, const char *reason)
             "[audio-output] dropped=%llu slot=%u reason=%s\n",
             dropped_buffers, slot, reason);
     }
+}
+
+bool applyRouting(OutputVoice &voice, const VoiceRouting &route)
+{
+    XAUDIO2_SEND_DESCRIPTOR descriptors[] = {{0, master}, {0, reverb_voice}};
+    XAUDIO2_VOICE_SENDS sends{reverb_voice ? 2u : 1u, descriptors};
+    HRESULT error = S_OK;
+    if (voice.sends_reverb != (reverb_voice != nullptr)) {
+        error = voice.source->SetOutputVoices(&sends);
+        if (FAILED(error)) {
+            disableOutput("SetOutputVoices", error);
+            return false;
+        }
+        voice.sends_reverb = reverb_voice != nullptr;
+    }
+    error = voice.source->SetOutputMatrix(master, route.channels, 2, route.dry);
+    if (SUCCEEDED(error) && reverb_voice)
+        error = voice.source->SetOutputMatrix(reverb_voice, route.channels, 2, route.wet);
+    if (FAILED(error)) {
+        disableOutput("SetOutputMatrix", error);
+        return false;
+    }
+    return true;
+}
+
+bool inRange(float value, float low, float high)
+{
+    return std::isfinite(value) && value >= low && value <= high;
 }
 
 bool queueBuffer(OutputVoice &voice, uint32_t slot, const uint8_t *pcm,
@@ -215,7 +256,7 @@ extern "C" void recomp_audio_output_initialize(void)
         return;
     }
     callback_registered = true;
-    error = engine->CreateMasteringVoice(&master);
+    error = engine->CreateMasteringVoice(&master, 2, 48000);
     if (FAILED(error)) {
         disableOutput("CreateMasteringVoice", error);
         return;
@@ -245,15 +286,96 @@ extern "C" void recomp_audio_output_shutdown(void)
     std::fprintf(stderr,
         "[audio-output] summary submitted_buffers=%llu submitted_bytes=%llu "
         "nonzero_buffers=%llu dropped_buffers=%llu underruns=%llu "
-        "engine_glitches=%u\n",
+        "engine_glitches=%u reverb_updates=%llu routing_updates=%llu\n",
         submitted_buffers, submitted_bytes, nonzero_buffers, dropped_buffers,
-        underruns, engine_glitches);
+        underruns, engine_glitches, reverb_updates, routing_updates);
 }
 
 extern "C" void recomp_audio_output_reset_voice(uint32_t slot)
 {
+    if (!recomp_audio_output_on_owner_thread()) return;
     checkCriticalError();
-    if (slot < kVoiceCount) destroyVoice(voices[slot]);
+    if (slot < kVoiceCount) {
+        destroyVoice(voices[slot]);
+        routing[slot] = {};
+    }
+}
+
+extern "C" int recomp_audio_output_set_reverb(const RecompAudioReverb *parameters)
+{
+    if (!recomp_audio_output_on_owner_thread() || !parameters) return 0;
+    const RecompAudioReverb &p = *parameters;
+    if (p.room < -10000 || p.room > 0 || p.room_hf < -10000 || p.room_hf > 0 ||
+        !inRange(p.room_rolloff, 0.0f, 10.0f) ||
+        !inRange(p.decay_time, 0.1f, 20.0f) ||
+        !inRange(p.decay_hf_ratio, 0.1f, 2.0f) ||
+        p.reflections < -10000 || p.reflections > 1000 ||
+        !inRange(p.reflections_delay, 0.0f, 0.3f) ||
+        p.reverb < -10000 || p.reverb > 2000 ||
+        !inRange(p.reverb_delay, 0.0f, 0.1f) ||
+        !inRange(p.diffusion, 0.0f, 100.0f) ||
+        !inRange(p.density, 0.0f, 100.0f) ||
+        !inRange(p.hf_reference, 20.0f, 20000.0f)) return 0;
+    recomp_audio_output_initialize();
+    if (muted) return 1;
+    if (!recomp_audio_output_enabled()) return 0;
+    if (!reverb_voice) {
+        IUnknown *effect = nullptr;
+        HRESULT error = XAudio2CreateReverb(&effect);
+        if (FAILED(error)) {
+            disableOutput("XAudio2CreateReverb", error);
+            return 0;
+        }
+        XAUDIO2_EFFECT_DESCRIPTOR descriptor{effect, TRUE, 2};
+        XAUDIO2_EFFECT_CHAIN chain{1, &descriptor};
+        error = engine->CreateSubmixVoice(&reverb_voice, 2, 48000, 0, 0, nullptr, &chain);
+        effect->Release();
+        if (FAILED(error)) {
+            disableOutput("CreateSubmixVoice", error);
+            return 0;
+        }
+    }
+    XAUDIO2FX_REVERB_I3DL2_PARAMETERS i3dl2{100.0f, p.room, p.room_hf,
+        p.room_rolloff, p.decay_time, p.decay_hf_ratio, p.reflections,
+        p.reflections_delay, p.reverb, p.reverb_delay, p.diffusion,
+        p.density, p.hf_reference};
+    XAUDIO2FX_REVERB_PARAMETERS native{};
+    /* shortcut: native conversion ignores rolloff; add distance behavior with 3D buffers. */
+    ReverbConvertI3DL2ToNative(&i3dl2, &native, FALSE);
+    const HRESULT error = reverb_voice->SetEffectParameters(0, &native, sizeof native);
+    if (FAILED(error)) {
+        disableOutput("ReverbSetEffectParameters", error);
+        return 0;
+    }
+    ++reverb_updates;
+    return 1;
+}
+
+extern "C" int recomp_audio_output_set_voice_routing(uint32_t slot, uint32_t channels,
+    const float *dry, const float *wet)
+{
+    if (!recomp_audio_output_on_owner_thread() || slot >= kVoiceCount ||
+        (channels != 1 && channels != 2) || !dry || !wet) return 0;
+    VoiceRouting route{};
+    route.channels = channels;
+    bool wet_send = false;
+    for (uint32_t i = 0; i < channels * 2; ++i) {
+        if (!inRange(dry[i], -XAUDIO2_MAX_VOLUME_LEVEL, XAUDIO2_MAX_VOLUME_LEVEL) ||
+            !inRange(wet[i], -XAUDIO2_MAX_VOLUME_LEVEL, XAUDIO2_MAX_VOLUME_LEVEL)) return 0;
+        route.dry[i] = dry[i];
+        route.wet[i] = wet[i];
+        wet_send |= wet[i] != 0.0f;
+    }
+    recomp_audio_output_initialize();
+    if (muted) return 1;
+    if (!recomp_audio_output_enabled() || (wet_send && !reverb_voice)) return 0;
+    OutputVoice &voice = voices[slot];
+    if (voice.source && voice.channels != channels) return 0;
+    if (std::memcmp(&routing[slot], &route, sizeof route) == 0) return 1;
+    if (voice.source && !applyRouting(voice, route)) return 0;
+    routing[slot] = route;
+    ++routing_updates;
+    return 1;
 }
 
 extern "C" void recomp_audio_output_submit(
@@ -279,6 +401,10 @@ extern "C" void recomp_audio_output_submit(
     }
 
     OutputVoice &voice = voices[slot];
+    if (routing[slot].channels && routing[slot].channels != channels) {
+        dropBuffer(slot, "routing-channel-mismatch");
+        return;
+    }
     if (voice.source && (voice.sample_rate != sample_rate ||
         voice.channels != channels || voice.bits_per_sample != bits_per_sample)) {
         destroyVoice(voice);
@@ -302,6 +428,7 @@ extern "C" void recomp_audio_output_submit(
         voice.channels = channels;
         voice.bits_per_sample = bits_per_sample;
         voice.level_ms = kPrerollMs;
+        if (routing[slot].channels && !applyRouting(voice, routing[slot])) return;
         error = voice.source->Start();
         if (FAILED(error)) {
             dropBuffer(slot, "start-voice");

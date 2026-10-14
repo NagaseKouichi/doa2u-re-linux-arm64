@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "kernel_abi.h"
 #include "xbox_memory_layout.h"
+#include "xapi_time_adapter.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -113,6 +114,11 @@ int main(void)
     check("repeat close", KERNEL(187u, handles[0]), 0xc0000008u);
     check("closed wait handle", KERNEL(234u, handles[0], 1u, 0u, 0u), 0xc0000008u);
     check("closed resume handle", KERNEL(224u, handles[0], 0u), 0xc0000008u);
+    const uint64_t limit = recomp_xapi_performance_counter() + UINT64_C(2000000000);
+    while ((turns[0] < 3u || turns[1] < 3u) && recomp_xapi_performance_counter() < limit) {
+        recomp_kernel_poll();
+    }
+    check("busy-poll peer progress", turns[0] + turns[1], 6u);
     recomp_kernel_run_threads();
     check("worker zero", turns[0], 3u);
     check("worker one", turns[1], 3u);

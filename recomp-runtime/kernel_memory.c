@@ -8,11 +8,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 enum {
     PAGE_READWRITE = 0x04u,
     MEM_RELEASE = 0x8000u,
     MAX_ALLOCATIONS = 4096u,
+    MEMORY_PAGE_BYTES = 0x1000u,
+    MEMORY_STATISTICS_WORDS = 9u,
 };
 
 static const uint32_t STATUS_SUCCESS = 0x00000000u;
@@ -398,6 +401,62 @@ static void bridge_mm_query_allocation_size(void)
     kernel_return(1u, allocation == NULL ? 0u : allocation->size);
 }
 
+uint32_t recomp_kernel_query_memory_statistics(uint32_t *statistics)
+{
+    if (statistics == NULL || statistics[0] != MEMORY_STATISTICS_WORDS * sizeof(uint32_t)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    XboxHeapSnapshot heap = xbox_HeapSnapshot();
+    uint32_t available = heap.available_pages;
+    uint64_t pool_bytes = 0u, stack_bytes = 0u, virtual_bytes = 0u;
+    for (size_t i = 0u; i < MAX_ALLOCATIONS; ++i) {
+        const Allocation *allocation = &allocations[i];
+        if (!allocation->active) {
+            uint64_t base = allocation->base & 0x7fffffffu;
+            uint64_t first = (base + MEMORY_PAGE_BYTES - 1u) / MEMORY_PAGE_BYTES;
+            uint64_t last = (base + allocation->capacity) / MEMORY_PAGE_BYTES;
+            if (last > first) available += (uint32_t)(last - first);
+        } else if (allocation->kind == ALLOCATION_VIRTUAL) {
+            virtual_bytes += allocation->capacity != 0u ? allocation->capacity : allocation->size;
+        } else if (allocation->kind == ALLOCATION_STACK) {
+            stack_bytes += allocation->capacity;
+        } else {
+            pool_bytes += allocation->capacity;
+        }
+    }
+    if (virtual_bytes > UINT32_MAX) virtual_bytes = UINT32_MAX;
+    /* Native arena accounting: image includes its low-address reservation;
+       unused bootstrap pages stay unavailable, and raw heap users have no
+       category. Reusable partial pages and alignment gaps are not available.
+       Pool includes system/contiguous capacity; VM has no reserve-only mode
+       and no guest cache-page allocator. Categories are byte sums rounded up. */
+    uint32_t result[MEMORY_STATISTICS_WORDS] = {
+        sizeof result,
+        RECOMP_XBOX_RAM_SIZE / MEMORY_PAGE_BYTES,
+        available,
+        (uint32_t)virtual_bytes,
+        (uint32_t)virtual_bytes,
+        0u,
+        (uint32_t)((pool_bytes + MEMORY_PAGE_BYTES - 1u) / MEMORY_PAGE_BYTES),
+        (XBOX_STARTUP_STACK_TOP - XBOX_STARTUP_STACK_BASE + MEMORY_PAGE_BYTES - 1u) / MEMORY_PAGE_BYTES +
+            (uint32_t)((stack_bytes + MEMORY_PAGE_BYTES - 1u) / MEMORY_PAGE_BYTES),
+        heap.image_bytes / MEMORY_PAGE_BYTES,
+    };
+    memcpy(statistics, result, sizeof result);
+    return STATUS_SUCCESS;
+}
+
+static void bridge_mm_query_statistics(void)
+{
+    uint32_t address = kernel_arg(1u);
+    uint32_t status = STATUS_INVALID_PARAMETER;
+    if (address != 0u && *recomp_memory_u32(address) == MEMORY_STATISTICS_WORDS * sizeof(uint32_t)) {
+        status = recomp_kernel_query_memory_statistics(
+            (uint32_t *)recomp_memory(address, MEMORY_STATISTICS_WORDS * sizeof(uint32_t)));
+    }
+    kernel_return(1u, status);
+}
+
 static void bridge_mm_set_address_protect(void)
 {
     Allocation *allocation = find_containing_allocation(kernel_arg(1u));
@@ -582,6 +641,7 @@ RecompFunction recomp_kernel_memory(uint32_t ordinal)
     case 178u: return bridge_mm_persist_contiguous_memory;
     case 179u: return bridge_mm_query_address_protect;
     case 180u: return bridge_mm_query_allocation_size;
+    case 181u: return bridge_mm_query_statistics;
     case 182u: return bridge_mm_set_address_protect;
     case 184u: return bridge_nt_allocate_virtual_memory;
     case 199u: return bridge_nt_free_virtual_memory;

@@ -33,10 +33,24 @@ static void bridge_io_create_device(void)
     kernel_return(6u, result.status);
 }
 
+/* shortcut: offline host has no PHY; bind native link status with online services.
+   0x801F0001 is the PHY hardware-error result. */
+static void bridge_phy_initialize(void)
+{
+    kernel_return(2u, 0x801f0001u);
+}
+
+static void bridge_phy_get_link_state(void)
+{
+    kernel_return(1u, 0u);
+}
+
 RecompFunction recomp_kernel_device(uint32_t ordinal)
 {
     switch (ordinal) {
     case 65u: return bridge_io_create_device;
+    case 252u: return bridge_phy_get_link_state;
+    case 253u: return bridge_phy_initialize;
     default: return NULL;
     }
 }

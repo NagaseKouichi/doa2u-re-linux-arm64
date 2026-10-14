@@ -120,6 +120,9 @@ int recomp_kernel_time_fields_to_time(const uint16_t *fields, uint64_t *time);
    ordinary FIPS 180-1 SHA-1, so this is testable against published vectors
    without any guest involvement. */
 #define RECOMP_SHA_DIGEST_BYTES 20u
+void recomp_kernel_hmac(const uint8_t *key, uint32_t key_bytes,
+    const uint8_t *first, uint32_t first_bytes, const uint8_t *second,
+    uint32_t second_bytes, uint8_t digest[RECOMP_SHA_DIGEST_BYTES]);
 
 typedef struct RecompShaContext {
     uint32_t state[5];
@@ -131,6 +134,15 @@ void recomp_kernel_sha_init(RecompShaContext *context);
 void recomp_kernel_sha_update(
     RecompShaContext *context, const uint8_t *input, uint32_t length);
 void recomp_kernel_sha_final(RecompShaContext *context, uint8_t *digest);
+
+enum { RECOMP_RC4_CONTEXT_BYTES = 258u };
+typedef struct RecompRc4Context {
+    uint8_t state[256];
+    uint8_t i, j;
+} RecompRc4Context;
+void recomp_kernel_rc4_key(RecompRc4Context *context,
+    const uint8_t *key, uint32_t key_length);
+void recomp_kernel_rc4_crypt(RecompRc4Context *context, uint8_t *input, uint32_t length);
 
 /* Plain image-section model used by its import adapter. */
 uint32_t recomp_kernel_load_section(uint32_t section);
@@ -147,6 +159,7 @@ uint32_t recomp_kernel_av_send_tv_encoder_option(
 
 /* Plain guest allocation operations shared by kernel models. */
 uint32_t recomp_kernel_allocate_pool(uint32_t size);
+uint32_t recomp_kernel_query_memory_statistics(uint32_t *statistics);
 void recomp_kernel_free_pool(uint32_t base);
 
 /* Plain DPC model operations shared by interrupt and timer adapters. */
@@ -159,6 +172,8 @@ uint32_t recomp_kernel_remove_dpc(uint32_t dpc);
 void recomp_kernel_queue_user_apc(
     uint32_t routine, uint32_t context, uint32_t io_status_block);
 void recomp_kernel_drain_dpcs(void);
+/* Service cooperative worker progress at native API clock-read boundaries. */
+void recomp_kernel_poll(void);
 /* Signal expired timers and queue their DPCs; returns the number queued. */
 unsigned recomp_kernel_expire_timers(void);
 

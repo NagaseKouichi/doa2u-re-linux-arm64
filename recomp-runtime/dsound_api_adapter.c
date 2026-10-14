@@ -2,6 +2,7 @@
 #include "dsound_api_adapter.h"
 #include "dsound_device_model.h"
 #include "dsound_buffer_adapter.h"
+#include "dsound_effects_adapter.h"
 #include "audio_output.h"
 #include "kernel_abi.h"
 #include "xbox_memory_layout.h"
@@ -41,6 +42,7 @@ void recomp_dsound_device_release_owner(void)
     }
     *recomp_memory_u32(root + 4u) = count;
     if (count == 0u) {
+        recomp_dsound_effects_reset();
         *recomp_memory_u32(DS_SINGLETON) = 0u;
         /* Invalidate the guest views even while the pool's bump allocator retains storage. */
         recomp_guest_memset(root, 0, DS_ROOT_SIZE);
@@ -88,6 +90,8 @@ static void create_device(void)
             *recomp_memory_u32(settings + 8u) = UINT32_MAX;
             *recomp_memory_u32(settings + 12u) = UINT32_MAX;
             memset(recomp_memory(settings + 0x10u, 31u), 1, 31u);
+            memcpy(recomp_memory(settings + 0x84u, 48u), recomp_memory(0x00380318u, 48u), 48u);
+            *recomp_memory_u32(settings + 0x80u) = 0xfffu;
             *recomp_memory_u32(DS_SINGLETON) = root;
         } else xbox_HeapRestore(checkpoint);
     }
@@ -149,16 +153,6 @@ static void speaker_config(void)
     kernel_return(2u, RECOMP_DSOUND_OK);
 }
 
-static void effects_image(void)
-{
-    recomp_dsound_require_device(kernel_arg(1u));
-    fprintf(stderr, "recomp dsound: effects image=%08x bytes=%u location=%08x output=%08x\n",
-        kernel_arg(2u), kernel_arg(3u), kernel_arg(4u), kernel_arg(5u));
-    /* 5849 decodes state before publishing nonnull effect maps. Native FX and
-       that decoding contract must exist before reporting a successful download. */
-    recomp_stop(2, "dsound:effects-image-unbound");
-}
-
 static void do_work(void)
 {
     if (device.handle != 0u) {
@@ -181,16 +175,17 @@ RecompFunction recomp_dsound_api_lookup_manual(uint32_t address)
     case 0x00363657u: return use_full_hrtf;
     case 0x00363621u: return cooperative_level;
     case 0x00364721u: return speaker_config;
-    case 0x0036473du: return effects_image;
     case 0x0036492cu: return do_work;
-    case 0x00364764u: case 0x0036478eu: case 0x00365c6eu:
-    case 0x00365fe0u: case 0x00366015u: case 0x0036604au:
+    case 0x00365fe0u: case 0x00366015u:
     case 0x00364955u: case 0x00363419u: return unsupported_device;
     case 0x00366257u: case 0x00363f70u: case 0x00363fb7u:
     case 0x00364005u: case 0x00364104u: case 0x00364155u:
     case 0x0036406cu: case 0x003640b9u: case 0x0036490au:
     case 0x0036490fu: case 0x00364914u: case 0x00365253u: return unsupported_stream;
-    default: return recomp_dsound_buffer_lookup_manual(address);
+    default: {
+        RecompFunction function = recomp_dsound_effects_lookup_manual(address);
+        return function != NULL ? function : recomp_dsound_buffer_lookup_manual(address);
+    }
     }
 }
 
@@ -202,6 +197,7 @@ void recomp_dsound_api_shutdown(void)
         return;
     }
     recomp_dsound_buffers_reset();
+    recomp_dsound_effects_reset();
     recomp_audio_output_shutdown();
     recomp_dsound_device_reset(&device);
     root = settings = 0u;

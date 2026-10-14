@@ -393,6 +393,25 @@ static void schedule(void)
     }
 }
 
+void recomp_kernel_poll(void)
+{
+    static uint64_t next_slice;
+    if (!scheduler_started) return;
+    const uint64_t now = recomp_xapi_performance_counter();
+    if (now < next_slice) return;
+    next_slice = now + UINT64_C(1000000);
+    unsigned selected = current_thread;
+    for (unsigned step = 1u; step < MAX_THREADS; ++step) {
+        unsigned index = (current_thread + step) % MAX_THREADS;
+        if (threads[index].priority >= threads[current_thread].priority &&
+            (selected == current_thread || threads[index].priority > threads[selected].priority) &&
+            thread_ready(&threads[index])) {
+            selected = index;
+        }
+    }
+    if (selected != current_thread) switch_thread(selected);
+}
+
 /* Vblank waiters are blocked until the shared refresh deadline. Merely
    yielding leaves them runnable and priority changes can run them again
    before the refresh, serializing peer waits with presentation. */

@@ -756,7 +756,7 @@ static void recomp_dispatch_indirect_from(
             "recomp runtime: unimplemented kernel import ordinal %" PRIu32
             " (%s) at saved esp 0x%08" PRIx32 "\n",
             ordinal,
-            name != NULL ? name : "not imported by this XBE",
+            name != NULL ? name : "name unavailable",
             saved_esp);
         recomp_stop(
             2, "import:%s", name != NULL ? name : "unknown");

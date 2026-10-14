@@ -340,6 +340,13 @@ static void swap(void)
     fprintf(stderr, "recomp d3d8: Swap frame=%u\n", result.command.data.present.swap_counter);
 }
 
+static void block_until_vertical_blank(void)
+{
+    recomp_d3d8_require_device();
+    recomp_d3d_wait_vblank();
+    recomp_runtime.registers.esp += 4u;
+}
+
 RecompFunction recomp_d3d8_lookup_manual(uint32_t address)
 {
     switch (address) {
@@ -354,6 +361,8 @@ RecompFunction recomp_d3d8_lookup_manual(uint32_t address)
     case 0x003459e0u: return set_tile;
     case 0x00347920u: return clear;
     case 0x0034af80u: return swap;
+    /* CRI's no-argument tail aliases bypass generated callee lookup. */
+    case 0x002fc300u: case 0x002fc5a0u: case 0x003444c0u: return block_until_vertical_blank;
     default: return NULL;
     }
 }

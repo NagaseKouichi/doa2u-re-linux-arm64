@@ -42,6 +42,11 @@ opaque unmapped handles and effects-download success stub. New 5849 bindings
 own device/buffer views and headroom/data/reference contracts. Host status
 distinguishes explicit mute from device failure. Input remains unbound.
 
+The effects decoder and guest view are independent new code. Native FX uses
+the installed XAudio2 I3DL2 implementation rather than retail DSP programs.
+The host tests compare dry and wet impulse tails and exercise native routing
+and teardown failures. Original SDK decoder comparisons remain private.
+
 ## Good next candidates, with work required
 
 | Candidate | Reusable part | DOA2U work |

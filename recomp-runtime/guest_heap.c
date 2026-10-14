@@ -58,6 +58,14 @@ bool xbox_HeapRestore(uint32_t checkpoint)
     return true;
 }
 
+XboxHeapSnapshot xbox_HeapSnapshot(void)
+{
+    uint32_t first_page = (heap_cursor + XBOX_PAGE_SIZE - 1u) / XBOX_PAGE_SIZE;
+    uint32_t last_page = contiguous_cursor / XBOX_PAGE_SIZE;
+    return (XboxHeapSnapshot){heap_base,
+        heap_base != 0u && last_page > first_page ? last_page - first_page : 0u};
+}
+
 uint32_t xbox_ContiguousAlloc(
     uint32_t size,
     uint32_t lowest_address,

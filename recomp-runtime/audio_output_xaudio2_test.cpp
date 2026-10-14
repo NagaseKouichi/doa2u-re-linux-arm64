@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <xaudio2.h>
+#include <xaudio2fx.h>
 
 #include <atomic>
 #include <cmath>
@@ -25,6 +26,29 @@ static void check(bool condition)
     }
 }
 
+struct FakeSendDescriptor { UINT32 Flags; void *pOutputVoice; };
+struct FakeVoiceSends { UINT32 SendCount; FakeSendDescriptor *pSends; };
+static bool reverb_unavailable, submix_unavailable, parameters_unavailable;
+static bool sends_unavailable, matrix_unavailable;
+static unsigned effect_create_calls, effect_balance, effect_parameter_calls;
+
+struct FakeEffect : IUnknown {
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **) override { return E_NOINTERFACE; }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++effect_balance; }
+    ULONG STDMETHODCALLTYPE Release() override { check(effect_balance != 0); return --effect_balance; }
+};
+static FakeEffect fake_effect;
+
+static HRESULT fakeCreateReverb(IUnknown **out)
+{
+    ++effect_create_calls;
+    if (reverb_unavailable) return E_OUTOFMEMORY;
+    check(effect_balance == 0);
+    *out = &fake_effect;
+    fake_effect.AddRef();
+    return S_OK;
+}
+
 struct FakeSource {
     WAVEFORMATEX format{};
     bool destroyed = false;
@@ -33,12 +57,36 @@ struct FakeSource {
     float ratio = 1.0f;
     UINT64 played = 0;
     std::vector<XAUDIO2_BUFFER> queued;
+    std::vector<void *> sends;
+    std::map<void *, std::vector<float>> matrices;
+    unsigned send_calls = 0, matrix_calls = 0;
 
     void DestroyVoice() { check(!destroyed); destroyed = true; queued.clear(); }
     HRESULT Start() { started = true; return S_OK; }
     void GetState(XAUDIO2_VOICE_STATE *state, UINT32 flags);
     HRESULT SetVolume(float gain) { volume = gain; return S_OK; }
     HRESULT SetFrequencyRatio(float value) { ratio = value; return S_OK; }
+    HRESULT SetOutputVoices(const FakeVoiceSends *values)
+    {
+        ++send_calls;
+        if (sends_unavailable) return XAUDIO2_E_INVALID_CALL;
+        sends.clear();
+        matrices.clear();
+        for (UINT32 i = 0; i < values->SendCount; ++i) {
+            check(values->pSends[i].Flags == 0 && values->pSends[i].pOutputVoice);
+            sends.push_back(values->pSends[i].pOutputVoice);
+        }
+        return S_OK;
+    }
+    HRESULT SetOutputMatrix(void *destination, UINT32 channels, UINT32 outputs,
+        const float *values)
+    {
+        ++matrix_calls;
+        check(channels == format.nChannels && outputs == 2 && destination);
+        if (matrix_unavailable) return XAUDIO2_E_INVALID_CALL;
+        matrices[destination] = std::vector<float>(values, values + channels * outputs);
+        return S_OK;
+    }
     HRESULT SubmitSourceBuffer(const XAUDIO2_BUFFER *buffer)
     {
         check(started && !destroyed);
@@ -69,12 +117,35 @@ struct FakeMaster {
     void DestroyVoice()
     {
         for (const auto *source : fake_sources) check(source->destroyed);
+        check(effect_balance == 0);
+    }
+};
+
+struct FakeSubmix {
+    bool destroyed = true;
+    XAUDIO2FX_REVERB_PARAMETERS parameters{};
+    HRESULT SetEffectParameters(UINT32 effect, const void *data, UINT32 bytes)
+    {
+        check(!destroyed && effect == 0 && bytes == sizeof parameters);
+        ++effect_parameter_calls;
+        if (parameters_unavailable) return XAUDIO2_E_INVALID_CALL;
+        std::memcpy(&parameters, data, bytes);
+        check(parameters.WetDryMix == 100.0f && parameters.RearDelay == 5);
+        return S_OK;
+    }
+    void DestroyVoice()
+    {
+        check(!destroyed);
+        for (const auto *source : fake_sources) check(source->destroyed);
+        destroyed = true;
+        fake_effect.Release();
     }
 };
 
 struct FakeEngine {
     IXAudio2EngineCallback *callback = nullptr;
     FakeMaster master;
+    FakeSubmix submix;
     HRESULT RegisterForCallbacks(IXAudio2EngineCallback *value)
     {
         callback = value;
@@ -85,10 +156,26 @@ struct FakeEngine {
         check(value == callback);
         callback = nullptr;
     }
-    HRESULT CreateMasteringVoice(FakeMaster **out)
+    HRESULT CreateMasteringVoice(FakeMaster **out, UINT32 channels, UINT32 rate)
     {
+        check(channels == 2 && rate == 48000);
         if (master_unavailable) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
         *out = &master;
+        return S_OK;
+    }
+    HRESULT CreateSubmixVoice(FakeSubmix **out, UINT32 channels, UINT32 rate,
+        UINT32 flags, UINT32 stage, const FakeVoiceSends *sends,
+        const XAUDIO2_EFFECT_CHAIN *chain)
+    {
+        check(channels == 2 && rate == 48000 && flags == 0 && stage == 0 && !sends &&
+            chain && chain->EffectCount == 1 &&
+            chain->pEffectDescriptors->pEffect == &fake_effect &&
+            chain->pEffectDescriptors->InitialState == TRUE &&
+            chain->pEffectDescriptors->OutputChannels == 2 && submix.destroyed);
+        if (submix_unavailable) return E_OUTOFMEMORY;
+        fake_effect.AddRef();
+        submix.destroyed = false;
+        *out = &submix;
         return S_OK;
     }
     HRESULT CreateSourceVoice(FakeSource **out, const WAVEFORMATEX *format,
@@ -137,6 +224,7 @@ using std::atomic;
 using std::fprintf;
 using std::isfinite;
 using std::memcpy;
+using std::memcmp;
 using std::memset;
 using std::memory_order_relaxed;
 using std::pow;
@@ -175,7 +263,11 @@ void free(void *data)
 #define IXAudio2 FakeEngine
 #define IXAudio2MasteringVoice FakeMaster
 #define IXAudio2SourceVoice FakeSource
+#define IXAudio2SubmixVoice FakeSubmix
+#define XAUDIO2_SEND_DESCRIPTOR FakeSendDescriptor
+#define XAUDIO2_VOICE_SENDS FakeVoiceSends
 #define XAudio2Create fakeCreate
+#define XAudio2CreateReverb fakeCreateReverb
 #define CoInitializeEx fakeComInitialize
 #define CoUninitialize fakeComUninitialize
 #define std test_std
@@ -188,13 +280,23 @@ void free(void *data)
 #undef CoUninitialize
 #undef CoInitializeEx
 #undef XAudio2Create
+#undef XAudio2CreateReverb
+#undef XAUDIO2_VOICE_SENDS
+#undef XAUDIO2_SEND_DESCRIPTOR
+#undef IXAudio2SubmixVoice
 #undef IXAudio2SourceVoice
 #undef IXAudio2MasteringVoice
 #undef IXAudio2
 
 int main()
 {
+    check(sizeof(RecompAudioReverb) == 48);
     uint8_t pcm[8] = {1, 0, 2, 0, 3, 0, 4, 0};
+    const RecompAudioReverb reverb_parameters{
+        -1000, -100, 0.0f, 1.49f, 0.83f, -2602, 0.007f, 200, 0.011f,
+        100.0f, 100.0f, 5000.0f};
+    const float mono_dry[] = {1.0f, 0.0f}, mono_wet[] = {0.25f, 0.5f};
+    const float silent[] = {0.0f, 0.0f, 0.0f, 0.0f};
     const char *muted_values[] = {
         "0", "", "garbage", "nan", "inf", "-0.1", "1.01", "1x"};
     for (const char *value : muted_values) {
@@ -207,6 +309,11 @@ int main()
             gain_reads == reads + 1);
         check(recomp_audio_output_ready() == (std::strcmp(value, "0") == 0) &&
             !recomp_audio_output_enabled());
+        check(recomp_audio_output_set_reverb(&reverb_parameters) ==
+            (std::strcmp(value, "0") == 0));
+        check(recomp_audio_output_set_voice_routing(0, 1, mono_dry, mono_wet) ==
+            (std::strcmp(value, "0") == 0));
+        check(effect_create_calls == 0 && effect_balance == 0);
         recomp_audio_output_shutdown();
         check(!recomp_audio_output_ready());
         summary_printed = false;
@@ -384,7 +491,97 @@ int main()
     recomp_audio_output_shutdown();
     recomp_audio_output_shutdown();
     check(release_calls == 3 && !recomp_audio_output_ready());
+    check(!recomp_audio_output_set_reverb(&reverb_parameters) &&
+        !recomp_audio_output_set_voice_routing(0, 1, mono_dry, mono_wet));
+
+    /* Separate process lifecycle for native FX and routing contracts. */
+    attempted = summary_printed = false;
+    critical_error = S_OK;
+    fake_gain = "1";
+    check(recomp_audio_output_set_voice_routing(10, 1, mono_dry, silent));
+    recomp_audio_output_submit(10, pcm, sizeof pcm, 8000, 1, 16, 0);
+    source = voices[10].source;
+    check(source && source->send_calls == 0 && source->matrix_calls == 1 &&
+        source->matrices[master] == std::vector<float>({1.0f, 0.0f}));
+    check(!recomp_audio_output_set_voice_routing(10, 1, mono_dry, mono_wet) &&
+        recomp_audio_output_ready());
+    check(recomp_audio_output_set_reverb(&reverb_parameters));
+    check(reverb_voice && effect_balance == 1 && effect_create_calls == 1 &&
+        effect_parameter_calls == 1 && reverb_updates == 1 &&
+        fake_engine.submix.parameters.RoomFilterMain == -10.0f &&
+        fake_engine.submix.parameters.RoomFilterHF == -1.0f &&
+        fake_engine.submix.parameters.RoomFilterFreq == 5000.0f &&
+        fake_engine.submix.parameters.DecayTime == 1.49f &&
+        fake_engine.submix.parameters.ReflectionsDelay == 7 &&
+        fake_engine.submix.parameters.ReverbDelay == 11);
+    check(recomp_audio_output_set_voice_routing(10, 1, mono_dry, mono_wet));
+    check(source->send_calls == 1 && source->matrix_calls == 3 &&
+        source->sends == std::vector<void *>({master, reverb_voice}) &&
+        source->matrices[reverb_voice] == std::vector<float>({0.25f, 0.5f}));
+    check(recomp_audio_output_set_voice_routing(10, 1, mono_dry, mono_wet));
+    check(source->send_calls == 1 && source->matrix_calls == 3);
+    check(recomp_audio_output_set_voice_routing(10, 1, silent, mono_wet));
+    check(source->send_calls == 1 && source->matrix_calls == 5 &&
+        source->matrices[master] == std::vector<float>({0.0f, 0.0f}));
+    std::thread([&] {
+        check(!recomp_audio_output_set_reverb(&reverb_parameters) &&
+            !recomp_audio_output_set_voice_routing(10, 1, mono_dry, mono_wet));
+        recomp_audio_output_reset_voice(10);
+    }).join();
+    check(source->matrix_calls == 5 && effect_parameter_calls == 1 && !source->destroyed);
+    RecompAudioReverb invalid = reverb_parameters;
+    invalid.decay_hf_ratio = NAN;
+    const float invalid_matrix[] = {NAN, 0.0f};
+    check(!recomp_audio_output_set_reverb(nullptr) &&
+        !recomp_audio_output_set_reverb(&invalid) &&
+        !recomp_audio_output_set_voice_routing(10, 1, invalid_matrix, mono_wet) &&
+        !recomp_audio_output_set_voice_routing(10, 2, silent, silent) &&
+        !recomp_audio_output_set_voice_routing(256, 1, mono_dry, silent) &&
+        recomp_audio_output_ready() && effect_parameter_calls == 1);
+    invalid = reverb_parameters;
+    invalid.reflections = 1001;
+    check(!recomp_audio_output_set_reverb(&invalid) && recomp_audio_output_ready());
+
+    const float stereo_dry[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    const float stereo_wet[] = {0.3f, 0.0f, 0.0f, 0.7f};
+    check(recomp_audio_output_set_voice_routing(11, 2, stereo_dry, stereo_wet));
+    recomp_audio_output_submit(11, pcm, sizeof pcm, 48000, 2, 16, 0);
+    source = voices[11].source;
+    check(source && source->matrices[master] == std::vector<float>(stereo_dry, stereo_dry + 4) &&
+        source->matrices[reverb_voice] == std::vector<float>(stereo_wet, stereo_wet + 4));
+    recomp_audio_output_submit(11, pcm, sizeof pcm, 16000, 2, 16, 0);
+    check(source->destroyed && voices[11].source && routing[11].channels == 2 &&
+        voices[11].source->matrices[reverb_voice] == std::vector<float>(stereo_wet, stereo_wet + 4));
+    recomp_audio_output_reset_voice(11);
+    check(!routing[11].channels);
+    const auto routed_submissions = submitted_buffers;
+    recomp_audio_output_submit(10, pcm, sizeof pcm, 48000, 2, 16, 0);
+    check(submitted_buffers == routed_submissions && recomp_audio_output_ready());
+    check(recomp_audio_output_set_reverb(&reverb_parameters) && effect_create_calls == 1 &&
+        effect_parameter_calls == 2);
+    recomp_audio_output_shutdown();
+    check(!reverb_voice && effect_balance == 0 && !engine && allocations.empty());
+
+    /* Creation, parameter and routing failures never advertise a healthy host. */
+    bool *failures[] = {&reverb_unavailable, &submix_unavailable,
+        &parameters_unavailable, &sends_unavailable, &matrix_unavailable};
+    for (bool *failure : failures) {
+        attempted = summary_printed = false;
+        critical_error = S_OK;
+        *failure = true;
+        if (failure == &sends_unavailable || failure == &matrix_unavailable) {
+            check(recomp_audio_output_set_reverb(&reverb_parameters));
+            recomp_audio_output_submit(20, pcm, sizeof pcm, 8000, 1, 16, 0);
+            check(!recomp_audio_output_set_voice_routing(20, 1, mono_dry, mono_wet));
+        } else {
+            check(!recomp_audio_output_set_reverb(&reverb_parameters));
+        }
+        check(!recomp_audio_output_ready() && !engine && !reverb_voice &&
+            effect_balance == 0 && allocations.empty() && com_balance == 0);
+        recomp_audio_output_shutdown();
+        *failure = false;
+    }
     for (auto *voice : fake_sources) delete voice;
-    std::puts("PASS audio output ownership, FIFO, overflow, volume, teardown, failures");
+    std::puts("PASS audio output ownership, FIFO, overflow, volume, native FX routing and failures");
     return 0;
 }

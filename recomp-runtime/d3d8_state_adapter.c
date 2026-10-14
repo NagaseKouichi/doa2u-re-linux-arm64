@@ -194,6 +194,14 @@ static void light_enable(void)
     kernel_return(2u, 0u);
 }
 
+static void vertex_shader_unbound(void)
+{
+    recomp_d3d8_require_device();
+    /* shortcut: bind FVF/program state with the remaining 5849 frame setup;
+       the SDK push-buffer path waits for hardware this native host lacks. */
+    recomp_stop(2, "d3d8:vertex-shader-unbound:%08x", kernel_arg(1u));
+}
+
 RecompFunction recomp_d3d8_state_lookup_manual(uint32_t address)
 {
     /* Verified 5849 API entries; spot lights and >8 active lights stop explicitly. */
@@ -203,6 +211,7 @@ RecompFunction recomp_d3d8_state_lookup_manual(uint32_t address)
     case 0x003465c0u: return set_fog_color;
     case 0x00345040u: return set_light;
     case 0x00345300u: return light_enable;
+    case 0x00349320u: return vertex_shader_unbound;
     default: return NULL;
     }
 }

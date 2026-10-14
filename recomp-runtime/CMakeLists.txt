@@ -65,6 +65,17 @@ add_executable(recomp_dsound_buffer_api_test dsound_buffer_adapter.c dsound_buff
     dsound_buffer_model.c xbox_adpcm.c)
 target_compile_definitions(recomp_dsound_buffer_api_test PRIVATE RECOMP_DSOUND_TEST_CLOCK)
 add_test(NAME recomp-runtime-dsound-buffer-api COMMAND recomp_dsound_buffer_api_test)
+add_executable(recomp_effects_image_test dsound_effects_image.c dsound_effects_image_test.c)
+add_test(NAME recomp-runtime-effects-image COMMAND recomp_effects_image_test)
+add_executable(recomp_effects_api_test dsound_effects_adapter.c dsound_effects_image.c dsound_effects_adapter_test.c)
+add_test(NAME recomp-runtime-effects-api COMMAND recomp_effects_api_test)
+add_executable(recomp_dsound_mix_test dsound_mix_model.c dsound_mix_model_test.c)
+add_test(NAME recomp-runtime-dsound-mix COMMAND recomp_dsound_mix_test)
+target_sources(recomp_dsound_buffer_api_test PRIVATE dsound_mix_model.c)
+if(NOT MSVC)
+    target_link_libraries(recomp_dsound_mix_test PRIVATE m)
+    target_link_libraries(recomp_dsound_buffer_api_test PRIVATE m)
+endif()
 
 add_executable(recomp_save_transaction_test save_transaction.cpp save_transaction_test.cpp)
 add_test(NAME recomp-runtime-save-transaction COMMAND recomp_save_transaction_test)
@@ -132,7 +143,7 @@ add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
     target_include_directories(recomp_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(recomp_kernel PUBLIC bcrypt)
     add_executable(recomp_kernel_test kernel_test.c kernel_device_test.c kernel_crypto_test.c
-        kernel_rtl_test.c kernel_thread_test.c kernel_video_test.c
+        kernel_memory_test.c kernel_rtl_test.c kernel_thread_test.c kernel_video_test.c
         flag_macro_test.c sse_semantics_test.c)
     target_link_libraries(recomp_kernel_test PRIVATE recomp_kernel)
     add_test(NAME recomp-runtime-kernel COMMAND recomp_kernel_test)
@@ -244,7 +255,7 @@ if(RECOMP_PROGRAM_DIR)
         d3d8_adapter.c d3d8_state_adapter.c d3d_device_model.c d3d_light_model.c
         d3d_frame_model.c d3d_tile_model.c
         dsound_api_adapter.c dsound_device_model.c dsound_buffer_adapter.c
-        dsound_buffer_model.c xbox_adpcm.c
+        dsound_buffer_model.c dsound_effects_adapter.c dsound_effects_image.c dsound_mix_model.c xbox_adpcm.c
         host_diagnostics.cpp "${_missing_source}" ${_program_sources})
     target_compile_definitions(recomp_program_runner PRIVATE RECOMP_XBE_SHA256="${_xbe_sha256}")
     if(MSVC)

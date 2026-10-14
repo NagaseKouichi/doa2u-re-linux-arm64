@@ -31,7 +31,8 @@ int main(void)
     }
     if (xbox_HeapAlloc(4u, 4u) != 0u ||
         xbox_ContiguousAlloc(0x1000u, 0u, UINT32_MAX, 0x1000u) != 0u ||
-        xbox_HeapCheckpoint() != 0u || xbox_HeapRestore(0u)) {
+        xbox_HeapCheckpoint() != 0u || xbox_HeapRestore(0u) ||
+        xbox_HeapSnapshot().image_bytes != 0u || xbox_HeapSnapshot().available_pages != 0u) {
         fprintf(stderr, "guest heap: allocation before image initialization\n");
         return 1;
     }
@@ -39,7 +40,9 @@ int main(void)
         xbox_HeapSetImageEnd(XBOX_GUEST_ALLOC_LIMIT) ||
         xbox_HeapSetImageEnd(XBOX_GUEST_ALLOC_LIMIT - 1u) ||
         !xbox_HeapSetImageEnd(image_end) || xbox_HeapSetImageEnd(image_end) ||
-        xbox_HeapCheckpoint() != image_floor) {
+        xbox_HeapCheckpoint() != image_floor ||
+        xbox_HeapSnapshot().image_bytes != image_floor ||
+        xbox_HeapSnapshot().available_pages != (XBOX_GUEST_ALLOC_LIMIT - image_floor) / 0x1000u) {
         fprintf(stderr, "guest heap: invalid image boundary accepted\n");
         return 1;
     }
@@ -66,11 +69,17 @@ int main(void)
         return 1;
     }
     checkpoint = xbox_HeapCheckpoint();
+    if (xbox_HeapSnapshot().available_pages != (physical - checkpoint) / 0x1000u) {
+        fprintf(stderr, "guest heap: snapshot ignored live reservations\n");
+        return 1;
+    }
     if (xbox_HeapRestore(image_floor - 1u) || xbox_HeapRestore(checkpoint + 1u) ||
         xbox_HeapAlloc(physical - checkpoint, 4u) != checkpoint ||
         xbox_HeapAlloc(4u, 4u) != 0u ||
         xbox_ContiguousAlloc(0x1000u, 0u, UINT32_MAX, 0x1000u) != 0u ||
-        xbox_HeapCheckpoint() != physical || !xbox_HeapRestore(checkpoint)) {
+        xbox_HeapCheckpoint() != physical || xbox_HeapSnapshot().available_pages != 0u ||
+        !xbox_HeapRestore(checkpoint) ||
+        xbox_HeapSnapshot().available_pages != (physical - checkpoint) / 0x1000u) {
         fprintf(stderr, "guest heap: live allocator boundaries crossed\n");
         return 1;
     }

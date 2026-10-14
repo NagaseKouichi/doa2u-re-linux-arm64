@@ -3,6 +3,7 @@
 
 int recomp_kernel_device_test(void);
 int recomp_kernel_crypto_test(void);
+int recomp_kernel_memory_test(void);
 int recomp_kernel_rtl_test(void);
 int recomp_kernel_thread_test(void);
 int recomp_kernel_video_test(void);
@@ -13,6 +14,7 @@ int main(void)
 {
     int passed = recomp_kernel_device_test();
     passed &= recomp_kernel_crypto_test();
+    passed &= recomp_kernel_memory_test();
     passed &= recomp_kernel_rtl_test();
     passed &= recomp_kernel_thread_test();
     passed &= recomp_kernel_video_test();

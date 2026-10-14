@@ -31,7 +31,10 @@ The graphics adapter supports the verified 720x480 startup mode. Additional
 resources, shaders and draw bindings remain work, as does input.
 The initial DirectSound 5849 adapter uses XAudio2 for PCM/Xbox ADPCM buffers,
 including data ownership, reference counts, headroom, looping and cursors.
-Effects-image download stops explicitly at `dsound:effects-image-unbound`.
+The effects-image adapter decodes programs, owns validated maps/state and
+binds native I3DL2 reverb with stereo dry/wet routing. Recording sends and
+3D crosstalk need further native services. The clock and vblank bindings
+allow background archive workers to progress during startup.
 Passing synthetic tests does not establish title-screen or gameplay
 compatibility.
 
@@ -51,7 +54,7 @@ ctest --test-dir build/recomp-runtime -C Debug --output-on-failure
 ```
 
 To also test real PCM consumption on this PC's audio endpoint, configure with
-`-DRECOMP_NATIVE_AUDIO_TEST=ON`. That test mutes its host mastering voice and
+`-DRECOMP_NATIVE_AUDIO_TEST=ON`. That test silences its captured output and
 requires a working endpoint; the default synthetic tests need no sound device.
 
 ## Import another local disc

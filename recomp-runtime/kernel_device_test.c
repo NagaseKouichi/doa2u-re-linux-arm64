@@ -80,5 +80,27 @@ int recomp_kernel_device_test(void)
     recomp_kernel_free_pool(result.device_extension);
     recomp_kernel_free_pool(result.device_object);
     recomp_kernel_free_pool(object);
+
+    RecompFunction phy_init = recomp_kernel_device(253u);
+    RecompFunction phy_link = recomp_kernel_device(252u);
+    passed &= expect_u32("PHY initialize lookup", phy_init != NULL, 1u);
+    passed &= expect_u32("PHY link lookup", phy_link != NULL, 1u);
+    if (phy_init == NULL || phy_link == NULL) return 0;
+    *recomp_memory_u32(TEST_OUTPUT) = 0xabcdef01u;
+    for (uint32_t mode = 0u; mode < 2u; ++mode) {
+        *recomp_memory_u32(TEST_ENTRY_ESP) = 0x12345678u;
+        *recomp_memory_u32(TEST_ENTRY_ESP + 4u) = mode;
+        *recomp_memory_u32(TEST_ENTRY_ESP + 8u) = TEST_OUTPUT;
+        recomp_runtime.registers.esp = TEST_ENTRY_ESP;
+        phy_init();
+        passed &= expect_u32("PHY initialization unavailable", recomp_runtime.registers.eax, 0x801f0001u);
+        passed &= expect_u32("PHY initialize stack", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 12u);
+        passed &= expect_u32("PHY optional parameter preserved", *recomp_memory_u32(TEST_OUTPUT), 0xabcdef01u);
+        recomp_runtime.registers.esp = TEST_ENTRY_ESP;
+        phy_link();
+        passed &= expect_u32("PHY cached/update link disconnected", recomp_runtime.registers.eax, 0u);
+        passed &= expect_u32("PHY link stack", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 8u);
+        passed &= expect_u32("PHY return slot", *recomp_memory_u32(TEST_ENTRY_ESP), 0x12345678u);
+    }
     return passed;
 }

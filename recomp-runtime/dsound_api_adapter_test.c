@@ -49,6 +49,8 @@ void recomp_audio_output_shutdown(void) { ++shutdown_count; ready = 0; }
 void recomp_dsound_buffers_pump(void) { ++pump_count; }
 void recomp_dsound_buffers_reset(void) { ++reset_count; }
 RecompFunction recomp_dsound_buffer_lookup_manual(uint32_t address) { (void)address; return NULL; }
+RecompFunction recomp_dsound_effects_lookup_manual(uint32_t address) { (void)address; return NULL; }
+void recomp_dsound_effects_reset(void) {}
 int recomp_dsound_buffer_addref_root(uint32_t object, uint32_t *count)
 {
     (void)object; (void)count; return 0;
@@ -119,11 +121,6 @@ int main(void)
     call(0x36492cu, args, 0u);
     CHECK(pump_count == 1 && recomp_runtime.registers.eax == 0x12345678u &&
         recomp_runtime.registers.esp == 0x1004u);
-    args[0] = handle; args[4] = output;
-    *recomp_memory_u32(output) = 0xabcdefu;
-    if (setjmp(stopped) == 0) { call(0x36473du, args, 5u); return 1; }
-    CHECK(strcmp(stop_reason, "dsound:effects-image-unbound") == 0 &&
-        *recomp_memory_u32(output) == 0xabcdefu && recomp_runtime.registers.esp == 0x1000u);
     args[0] = root;
     call(0x3636ffu, args, 1u);
     CHECK(recomp_runtime.registers.eax == 7u);

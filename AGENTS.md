@@ -10,7 +10,8 @@ and `docs/bring-up.md` before starting a game lift or runner.
 tests. `recomp_lookup_manual()` binds XAPI kernel lifetime and the initial
 D3D8 5849 device, frame and state APIs to the shared D3D11 presenter.
 DirectSound 5849 owns native device/buffer lifetime and PCM output.
-Effects-image download stops at `dsound:effects-image-unbound`.
+Effects-image download owns decoded maps/state and binds native I3DL2 reverb.
+Recording sends, 3D crosstalk and additional DSP processing remain guarded.
 Read the audio limits in `docs/bring-up.md` before extending this adapter.
 Read the graphics limits in `docs/bring-up.md` before extending this adapter.
 Before enabling another adapter,

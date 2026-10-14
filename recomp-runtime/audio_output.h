@@ -23,6 +23,26 @@ int recomp_audio_output_ready(void);
 /* Atomic owner check; does not inspect device state. */
 int recomp_audio_output_on_owner_thread(void);
 
+/* I3DL2 listener parameters, in hundredths of dB, seconds and percent.
+   Native reverb is a semantic replacement; Xbox DSP bit parity is unproven. */
+typedef struct RecompAudioReverb {
+    int32_t room, room_hf;
+    float room_rolloff, decay_time, decay_hf_ratio;
+    int32_t reflections;
+    float reflections_delay;
+    int32_t reverb;
+    float reverb_delay, diffusion, density, hf_reference;
+} RecompAudioReverb;
+
+/* Owner-thread calls. Nonzero on success or explicit mute; invalid parameters,
+   shutdown and backend failures return zero. A wet send requires set_reverb.
+   Matrices target stereo output: [source + destination * channels]. Mono uses
+   two entries, stereo four. An unconfigured slot uses the default dry send.
+   Routing survives source format recreation; reset_voice clears it. */
+int recomp_audio_output_set_reverb(const RecompAudioReverb *parameters);
+int recomp_audio_output_set_voice_routing(uint32_t slot, uint32_t channels,
+    const float *dry, const float *wet);
+
 /* Copies PCM before returning; never retains a guest-memory pointer.
    Slots: 0..255. PCM: 1000..200000 Hz, mono/stereo, unsigned 8 bit, signed
    16 bit, or 32-bit IEEE float (1.0 = full scale; values beyond +/-1 allowed).

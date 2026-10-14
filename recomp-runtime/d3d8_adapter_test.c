@@ -44,7 +44,8 @@ static RecompD3dPresenterCommand submitted;
 static RecompD3dPresenterError create_error;
 static RecompD3dPresenterError submit_error;
 static uint32_t create_count, submit_count, destroy_count;
-static uint32_t vblank_reset_count, wait_present_count;
+static uint32_t vblank_reset_count, wait_present_count, wait_vblank_count;
+void recomp_d3d_wait_vblank(void) { ++wait_vblank_count; }
 static jmp_buf stop_environment;
 static bool stop_armed;
 static int stop_code;
@@ -423,6 +424,13 @@ int main(void)
         *recomp_memory_u32(DEVICE + 0x2408u) == 0u &&
         *recomp_memory_u32(DEVICE + 0x1de4u) == 2u &&
         recomp_runtime.registers.eax == 2u);
+    passed &= call(0x3444c0u, arguments, 0u, NULL);
+    passed &= expect("vblank API waits without retail hardware event",
+        wait_vblank_count == 1u && recomp_runtime.registers.esp == ENTRY_ESP + 4u &&
+        recomp_runtime.registers.eax == EAX_SENTINEL);
+    passed &= expect("vblank tail aliases bind the same API",
+        recomp_d3d8_lookup_manual(0x2fc300u) == recomp_d3d8_lookup_manual(0x3444c0u) &&
+        recomp_d3d8_lookup_manual(0x2fc5a0u) == recomp_d3d8_lookup_manual(0x3444c0u));
     recomp_d3d8_shutdown();
     passed &= expect("shutdown destroys presenter once", destroy_count == 1u);
     recomp_d3d8_shutdown();

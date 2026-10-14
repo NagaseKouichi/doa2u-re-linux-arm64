@@ -183,6 +183,8 @@ int main(void)
     for (uint32_t i = 0u; i < 8u; ++i) invoke(0x345300u, i, 1u);
     if (setjmp(stopped) == 0) { invoke(0x345300u, 8u, 1u); return 1; }
     CHECK(strcmp(stop_reason, "d3d8:unsupported-active-light-count") == 0);
+    if (setjmp(stopped) == 0) { invoke(0x349320u, 0x112u, 0u); return 1; }
+    CHECK(strcmp(stop_reason, "d3d8:vertex-shader-unbound:00000112") == 0);
     puts("PASS D3D8 gamma, transform, fog and light ABI/shadow state");
     return 0;
 }

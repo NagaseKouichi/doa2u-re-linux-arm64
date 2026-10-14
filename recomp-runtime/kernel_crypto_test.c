@@ -14,6 +14,7 @@ enum {
     TEST_CONTEXT = TEST_MEMORY_BASE + 0x200u,
     TEST_DIGEST = TEST_MEMORY_BASE + 0x300u,
     TEST_INPUT = TEST_MEMORY_BASE + 0x400u,
+    TEST_KEY = TEST_MEMORY_BASE + TEST_MEMORY_SIZE - 64u,
 };
 
 typedef struct ShaVector {
@@ -96,6 +97,97 @@ static int check_byte_at_a_time(const ShaVector *vector)
     return expect_digest("byte-at-a-time digest", digest, vector->digest);
 }
 
+static int check_hmac_model(void)
+{
+    uint8_t key[80], digest[RECOMP_SHA_DIGEST_BYTES];
+    const uint8_t message[] = "block boundary";
+    int passed = 1;
+
+    /* RFC 2202 cases 1 and 2, with the first message split across inputs. */
+    memset(key, 0x0b, 20u);
+    recomp_kernel_hmac(key, 20u, (const uint8_t *)"Hi ", 3u,
+        (const uint8_t *)"There", 5u, digest);
+    passed &= expect_digest("HMAC RFC 2202 case 1", digest,
+        "b617318655057264e28bc0b6fb378c8ef146be00");
+    recomp_kernel_hmac((const uint8_t *)"Jefe", 4u, NULL, 0u,
+        (const uint8_t *)"what do ya want for nothing?", 28u, digest);
+    passed &= expect_digest("HMAC RFC 2202 case 2", digest,
+        "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    recomp_kernel_hmac(NULL, 0u, NULL, 0u, NULL, 0u, digest);
+    passed &= expect_digest("HMAC empty key and inputs", digest,
+        "fbdb1d1b18aa6c08324b7d64b71fb76370690e1d");
+
+    /* Independent Python hmac-SHA1 oracle over bytes(range(64)), not the
+       standard HMAC treatment of an oversized key. */
+    for (unsigned i = 0u; i < sizeof key; ++i) key[i] = (uint8_t)i;
+    recomp_kernel_hmac(key, 64u, message, sizeof message - 1u, NULL, 0u, digest);
+    passed &= expect_digest("HMAC 64-byte key", digest,
+        "7a2106f58bf458459dd09070dfdd27c0afd2d4f6");
+    recomp_kernel_hmac(key, sizeof key, message, sizeof message - 1u, NULL, 0u, digest);
+    passed &= expect_digest("HMAC truncates oversized key", digest,
+        "7a2106f58bf458459dd09070dfdd27c0afd2d4f6");
+    return passed;
+}
+
+/* RFC 6229, key 01 02 03 04 05, offsets 0/256; BSD terms are in NOTICE. */
+static const uint8_t rc4_key[] = {1u, 2u, 3u, 4u, 5u};
+static const uint8_t rc4_start[] = {
+    0xb2, 0x39, 0x63, 0x05, 0xf0, 0x3d, 0xc0, 0x27,
+    0xcc, 0xc3, 0x52, 0x4a, 0x0a, 0x11, 0x18, 0xa8,
+    0x69, 0x82, 0x94, 0x4f, 0x18, 0xfc, 0x82, 0xd5,
+    0x89, 0xc4, 0x03, 0xa4, 0x7a, 0x0d, 0x09, 0x19,
+};
+static const uint8_t rc4_offset_256[] = {
+    0x1c, 0xfc, 0xf6, 0x2b, 0x03, 0xed, 0xdb, 0x64,
+    0x1d, 0x77, 0xdf, 0xcf, 0x7f, 0x8d, 0x8c, 0x93,
+};
+
+static int expect_bytes(const char *label, const void *actual, const void *expected, size_t size)
+{
+    if (memcmp(actual, expected, size) == 0) return 1;
+    fprintf(stderr, "kernel crypto: %s differs\n", label);
+    return 0;
+}
+
+static int check_rc4_model(void)
+{
+    RecompRc4Context context, split_context, saved;
+    uint8_t bulk[272] = {0}, split[272] = {0}, empty[272] = {0};
+    int passed = expect_u32("RC4 context size", sizeof context, RECOMP_RC4_CONTEXT_BYTES);
+    recomp_kernel_rc4_key(&context, rc4_key, sizeof rc4_key);
+    saved = context;
+    recomp_kernel_rc4_key(&context, NULL, 0u);
+    passed &= expect_bytes("empty RC4 key preserves context", &context, &saved, sizeof context);
+    recomp_kernel_rc4_crypt(&context, NULL, 0u);
+    passed &= expect_bytes("empty RC4 input preserves context", &context, &saved, sizeof context);
+    recomp_kernel_rc4_crypt(&context, bulk, sizeof bulk);
+    passed &= expect_bytes("RC4 RFC 6229 offset 0", bulk, rc4_start, sizeof rc4_start);
+    passed &= expect_bytes("RC4 RFC 6229 offset 256", bulk + 256u, rc4_offset_256, sizeof rc4_offset_256);
+
+    recomp_kernel_rc4_key(&split_context, rc4_key, sizeof rc4_key);
+    recomp_kernel_rc4_crypt(&split_context, split, 7u);
+    recomp_kernel_rc4_crypt(&split_context, split + 7u, sizeof split - 7u);
+    passed &= expect_bytes("RC4 split stream", split, bulk, sizeof bulk);
+    passed &= expect_bytes("RC4 split state", &split_context, &context, sizeof context);
+    recomp_kernel_rc4_key(&context, rc4_key, sizeof rc4_key);
+    recomp_kernel_rc4_crypt(&context, bulk, sizeof bulk);
+    passed &= expect_bytes("RC4 decrypts in place", bulk, empty, sizeof bulk);
+    return passed;
+}
+
+static int rc4_bridge_call(RecompFunction function, uint32_t *stack,
+    uint32_t context, uint32_t length, uint32_t input)
+{
+    stack[0] = 0x0010abcdu;
+    stack[1] = context;
+    stack[2] = length;
+    stack[3] = input;
+    recomp_runtime.registers.esp = TEST_ENTRY_ESP;
+    function();
+    return expect_u32("RC4 ESP", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 16u) &
+        expect_u32("RC4 return slot", stack[0], 0x0010abcdu);
+}
+
 int recomp_kernel_crypto_test(void);
 
 int recomp_kernel_crypto_test(void)
@@ -109,6 +201,9 @@ int recomp_kernel_crypto_test(void)
     RecompFunction init = recomp_kernel_crypto(335u);
     RecompFunction update = recomp_kernel_crypto(336u);
     RecompFunction final = recomp_kernel_crypto(337u);
+    RecompFunction hmac = recomp_kernel_crypto(340u);
+    RecompFunction rc4_init = recomp_kernel_crypto(338u);
+    RecompFunction rc4_crypt = recomp_kernel_crypto(339u);
     uint32_t *stack;
     uint8_t digest[RECOMP_SHA_DIGEST_BYTES];
     int passed = 1;
@@ -117,17 +212,20 @@ int recomp_kernel_crypto_test(void)
         passed &= check_model(&vectors[i]);
         passed &= check_byte_at_a_time(&vectors[i]);
     }
+    passed &= check_hmac_model();
+    passed &= check_rc4_model();
 
     passed &= expect_u32("ordinal 335 is implemented", init != NULL, 1u);
     passed &= expect_u32("ordinal 336 is implemented", update != NULL, 1u);
     passed &= expect_u32("ordinal 337 is implemented", final != NULL, 1u);
+    passed &= expect_u32("ordinal 340 is implemented", hmac != NULL, 1u);
     passed &= expect_u32(
         "ordinal 334 stays unimplemented",
         recomp_kernel_crypto(334u) != NULL, 0u);
-    passed &= expect_u32(
-        "ordinal 338 stays unimplemented",
-        recomp_kernel_crypto(338u) != NULL, 0u);
-    if (init == NULL || update == NULL || final == NULL) {
+    passed &= expect_u32("ordinal 338 is implemented", rc4_init != NULL, 1u);
+    passed &= expect_u32("ordinal 339 is implemented", rc4_crypt != NULL, 1u);
+    if (init == NULL || update == NULL || final == NULL || hmac == NULL ||
+        rc4_init == NULL || rc4_crypt == NULL) {
         return 0;
     }
 
@@ -189,6 +287,67 @@ int recomp_kernel_crypto_test(void)
     init();
     passed &= expect_u32(
         "null context ESP", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 8u);
+
+    /* Only the first 64 key bytes exist in guest memory, although the guest
+       supplies an 80-byte key length. The bridge must honor truncation. */
+    for (unsigned i = 0u; i < 64u; ++i) *recomp_memory_i8(TEST_KEY + i) = (int8_t)i;
+    memcpy(recomp_memory(TEST_INPUT, 14u), "block boundary", 14u);
+    *recomp_memory_i8(TEST_DIGEST - 1u) = 0x12;
+    *recomp_memory_i8(TEST_DIGEST + RECOMP_SHA_DIGEST_BYTES) = 0x34;
+    stack[0] = 0x0010abcdu;
+    stack[1] = TEST_KEY;
+    stack[2] = 80u;
+    stack[3] = TEST_INPUT;
+    stack[4] = 5u;
+    stack[5] = TEST_INPUT + 5u;
+    stack[6] = 9u;
+    stack[7] = TEST_DIGEST;
+    recomp_runtime.registers.esp = TEST_ENTRY_ESP;
+    hmac();
+    passed &= expect_u32("HMAC ESP", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 32u);
+    passed &= expect_u32("HMAC return slot", stack[0], 0x0010abcdu);
+    passed &= expect_digest("HMAC bridge split inputs",
+        recomp_memory(TEST_DIGEST, RECOMP_SHA_DIGEST_BYTES),
+        "7a2106f58bf458459dd09070dfdd27c0afd2d4f6");
+    passed &= expect_u32("HMAC leading guard", (uint8_t)*recomp_memory_i8(TEST_DIGEST - 1u), 0x12u);
+    passed &= expect_u32("HMAC trailing guard",
+        (uint8_t)*recomp_memory_i8(TEST_DIGEST + RECOMP_SHA_DIGEST_BYTES), 0x34u);
+
+    memset(stack + 1u, 0, 6u * sizeof *stack);
+    stack[7] = TEST_DIGEST;
+    recomp_runtime.registers.esp = TEST_ENTRY_ESP;
+    hmac();
+    passed &= expect_digest("HMAC bridge null zero spans",
+        recomp_memory(TEST_DIGEST, RECOMP_SHA_DIGEST_BYTES),
+        "fbdb1d1b18aa6c08324b7d64b71fb76370690e1d");
+    passed &= expect_u32("empty HMAC ESP", recomp_runtime.registers.esp, TEST_ENTRY_ESP + 32u);
+
+    memcpy(recomp_memory(TEST_KEY, sizeof rc4_key), rc4_key, sizeof rc4_key);
+    memset(recomp_memory(TEST_INPUT, sizeof rc4_start), 0, sizeof rc4_start);
+    *recomp_memory_i8(TEST_CONTEXT - 1u) = 0x12;
+    *recomp_memory_i8(TEST_CONTEXT + RECOMP_RC4_CONTEXT_BYTES) = 0x34;
+    passed &= rc4_bridge_call(rc4_init, stack, TEST_CONTEXT, sizeof rc4_key, TEST_KEY);
+    passed &= expect_u32("RC4 initial byte i", (uint8_t)*recomp_memory_i8(TEST_CONTEXT + 256u), 0u);
+    passed &= expect_u32("RC4 initial byte j", (uint8_t)*recomp_memory_i8(TEST_CONTEXT + 257u), 0u);
+    passed &= rc4_bridge_call(rc4_crypt, stack, TEST_CONTEXT, 7u, TEST_INPUT);
+    passed &= rc4_bridge_call(rc4_crypt, stack, TEST_CONTEXT, 9u, TEST_INPUT + 7u);
+    passed &= expect_u32("RC4 live byte i", (uint8_t)*recomp_memory_i8(TEST_CONTEXT + 256u), 16u);
+
+    /* Moving opaque guest state must preserve the stream without a host cache. */
+    memcpy(recomp_memory(TEST_CONTEXT + 0x600u, RECOMP_RC4_CONTEXT_BYTES),
+        recomp_memory(TEST_CONTEXT, RECOMP_RC4_CONTEXT_BYTES), RECOMP_RC4_CONTEXT_BYTES);
+    passed &= rc4_bridge_call(rc4_crypt, stack, TEST_CONTEXT + 0x600u, 16u, TEST_INPUT + 16u);
+    passed &= expect_bytes("RC4 bridge split/moved stream",
+        recomp_memory(TEST_INPUT, sizeof rc4_start), rc4_start, sizeof rc4_start);
+    passed &= expect_u32("RC4 leading context guard", (uint8_t)*recomp_memory_i8(TEST_CONTEXT - 1u), 0x12u);
+    passed &= expect_u32("RC4 exact 258-byte end guard",
+        (uint8_t)*recomp_memory_i8(TEST_CONTEXT + RECOMP_RC4_CONTEXT_BYTES), 0x34u);
+    uint8_t saved_rc4[RECOMP_RC4_CONTEXT_BYTES];
+    memcpy(saved_rc4, recomp_memory(TEST_CONTEXT, sizeof saved_rc4), sizeof saved_rc4);
+    passed &= rc4_bridge_call(rc4_init, stack, TEST_CONTEXT, 0u, 0u);
+    passed &= rc4_bridge_call(rc4_crypt, stack, TEST_CONTEXT, 0u, 0u);
+    passed &= expect_bytes("RC4 empty bridge spans preserve state",
+        recomp_memory(TEST_CONTEXT, sizeof saved_rc4), saved_rc4, sizeof saved_rc4);
 
     return passed;
 }

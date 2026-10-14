@@ -26,6 +26,11 @@ overwrite PCR. Heap and contiguous allocations grow toward each other and
 reject overlap. The loader checks sections, source digests, stack/TLS bounds
 and reserved ranges before running code.
 
+Memory statistics report the arena's available pages and reusable allocation
+capacity, with image, pool, stack and virtual reservations accounted for.
+Raw runtime allocations and alignment gaps stay consumed. Cache pages are
+zero because this host has no separate guest cache-page allocator.
+
 Bootstrap TLS data is aligned to 16 bytes, with its pointer slot included in
 the stack-base calculation used by XAPI's negative TLS index. The selected
 entry creates the startup worker and returns; the host then schedules that
@@ -77,6 +82,9 @@ and additional resources/shaders/draws remain explicit limits or unbound
 APIs. The borrowed-texture capture limitation inherited from the presenter
 must be resolved before relying on queued non-linear texture uploads.
 No title/menu acceptance is established by these model contracts.
+SetVertexShader stops at the API boundary before its SDK push-buffer path
+can stall. Fixed-function vertex-format state, the remaining frame render
+states, material and texture bindings are the next graphics work.
 
 ## Audio API contract
 
@@ -96,16 +104,38 @@ The inherited clock drops output spans after a stall over 100 ms while
 advancing its cursor. Native endpoint consumption has an opt-in host test;
 synthetic API and backend tests remain suitable for public CI.
 
-The current explicit library frontier is `dsound:effects-image-unbound`.
-The effects image contains encoded state and descriptor maps required by
-later middleware. A successful download requires verified image decoding,
-owned guest-readable maps/state and native effects/routing. Returning a null
-descriptor with success would hide a required contract. Keep the stop at the
-whole API until that replacement exists; do not expose DSP MMIO pointers.
+`dsound_effects_image.c` decodes the encrypted DSP programs; CPU parameter
+states are plaintext. The parser owns its payload/maps, validates all spans
+and rejects nonempty Y storage. Its 256-map budget bounds allocation and
+overlap checks. Fixed decoder initialization comes from the authenticated
+executable at runtime. Synthetic vectors use independent initialization;
+no retail programs, keys or state are included in public source.
 
-Streams need packet/callback scheduling. 3D controls, mix-bin routing,
-scheduled StopEx, additional play flags and custom effects remain guarded.
+`dsound_effects_adapter.c` publishes owned guest-readable descriptor, state
+and scratch allocations. Failed parsing/allocation leaves the old image
+intact. Immediate state writes update the published view; deferred writes
+stay in shadow storage and flush with a dirty listener commit. Direct CPU
+state edits survive unless explicitly overwritten by a deferred update.
+This initial adapter requires an assigned reverb role. Unassigned roles are
+rejected before publication, preserving the current native graph and image.
+
+Native I3DL2 reverb runs on a stereo XAudio2 submix, using Microsoft's
+[parameter converter](https://learn.microsoft.com/en-us/windows/win32/api/xaudio2fx/nf-xaudio2fx-reverbconverti3dl2tonative).
+The source keeps separate dry/wet matrices, per-route volumes and per-bin
+headroom. Front stereo, wet bin 10 and muted other speaker routes are bound.
+Recorded impulse tests establish actual wet processing, not Xbox bit parity;
+the built-in converter ignores room rolloff. DSP programs are not executed.
+
+Recording sends contain decimation, phase and scratch/DMA transfer semantics;
+ordinary SourceVoice resampling is insufficient. Those sends and 3D crosstalk
+remain guarded, as do packet streams, scheduled StopEx, additional play flags
+and unsupported DSP processing. This is an initial native FX subset.
 Private notes hold actual graphics/audio startup and boot observations.
+
+The 5849 GetTickCount boundary reads shared monotonic time and offers bounded
+cooperative scheduler polling. D3D BlockUntilVerticalBlank and its two CRI
+tail aliases use the native shared-vblank service. These platform seams let
+the existing worker modules run; they do not force middleware load status.
 
 ## Remaining bring-up
 
@@ -117,7 +147,7 @@ Private notes hold actual graphics/audio startup and boot observations.
    scaffold; fix translator defects in the lifter and regenerate.
 3. Verify additional indirect targets and function bounds against the selected
    Ghidra program and private identity receipt when a run reaches them.
-4. Replace effects-image decoding/routing and CRI services, then XAPI
+4. Complete native recording/crosstalk routing and CRI services, then XAPI
    input/fibers. Verify native audio, movies, polling and worker scheduling
    against natural runs.
 5. Bind additional D3D8 resources, shaders and draws through the semantic
@@ -125,6 +155,11 @@ Private notes hold actual graphics/audio startup and boot observations.
 
 Online libraries and dashboard/update binaries are present on the disc.
 The initial scope is offline DOA2; any online behavior needs its own design.
+The verified XNetStartup boundary returns the native offline policy error
+WSASYSNOTREADY without creating a console network stack. The game handles
+its helper's failure; this seam does not report successful network startup.
+PHY initialization reports hardware unavailable, and link queries return
+disconnected flags, including after the game's failed network startup.
 
 Record each observed frontier privately. A public model-test pass or a
 completed lift alone is not a gameplay result.

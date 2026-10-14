@@ -60,6 +60,11 @@ void recomp_dsound_device_release_owner(void) { CHECK(owners); if (!--owners) de
 int recomp_audio_output_ready(void) { return ready; }
 int recomp_audio_output_enabled(void) { return ready && !muted; }
 void recomp_audio_output_reset_voice(uint32_t slot) { CHECK(slot < 256); ++resets; }
+uint32_t recomp_dsound_effects_headroom(uint32_t bin) { CHECK(bin < 32u); return 0u; }
+int recomp_audio_output_set_voice_routing(uint32_t slot, uint32_t channels, const float *dry, const float *wet)
+{
+    CHECK(slot < 256u && (channels == 1u || channels == 2u) && dry && wet); return ready;
+}
 void recomp_audio_output_submit(uint32_t slot, const uint8_t *pcm, uint32_t bytes,
     uint32_t rate, uint32_t channels, uint32_t bits, int32_t volume)
 {
@@ -298,8 +303,15 @@ static void test_validation_and_guards(void)
     fail_after = -1; write32(DESC + 8, 0);
     memmove(recomp_memory(FORMAT + 1, 20), recomp_memory(FORMAT, 20), 20); write32(DESC + 12, FORMAT + 1);
     uint32_t handle = create();
-    expect_stop(0x3647e6, handle, "dsound:buffer-mix-volumes-unbound");
-    expect_stop(0x36513d, handle, "dsound:buffer-mix-bins-unbound");
+    CHECK(CALL(0x3647e6, handle, 0) == RECOMP_DSOUND_POINTER_ERROR);
+    CHECK(CALL(0x36513d, handle, 0) == 0);
+    write32(DATA, 1); write32(DATA + 4, DATA + 8);
+    write32(DATA + 8, 10); write32(DATA + 12, (uint32_t)-2000);
+    CHECK(CALL(0x3647e6, handle, DATA) == 0);
+    CHECK(read32(read32(handle) + 0x24u) == 2u);
+    CHECK(CALL(0x36513d, handle, DATA) == 0);
+    CHECK(read32(read32(handle) + 0x24u) == 1u &&
+        *recomp_memory_i8(read32(handle) + 0x28u) == 10);
     expect_stop(0x365159, handle, "dsound:buffer-3d-unbound");
     expect_stop(0x366257, handle, "dsound:stream-unbound");
     CHECK(recomp_dsound_buffer_lookup_manual(0x1234) == NULL);

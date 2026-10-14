@@ -176,6 +176,66 @@ void recomp_kernel_sha_final(RecompShaContext *context, uint8_t *digest)
     }
 }
 
+void recomp_kernel_hmac(
+    const uint8_t *key, uint32_t key_length,
+    const uint8_t *first, uint32_t first_length,
+    const uint8_t *second, uint32_t second_length, uint8_t *digest)
+{
+    RecompShaContext context;
+    uint8_t pad[SHA1_BLOCK_BYTES] = {0};
+    uint8_t inner[RECOMP_SHA_DIGEST_BYTES];
+
+    if (digest == NULL || (key == NULL && key_length != 0u) ||
+        (first == NULL && first_length != 0u) ||
+        (second == NULL && second_length != 0u)) {
+        return;
+    }
+    /* Xbox truncates oversized keys instead of hashing them first. */
+    if (key_length > SHA1_BLOCK_BYTES) key_length = SHA1_BLOCK_BYTES;
+    if (key_length != 0u) memcpy(pad, key, key_length);
+    for (unsigned i = 0u; i < sizeof pad; ++i) pad[i] ^= 0x36u;
+    recomp_kernel_sha_init(&context);
+    recomp_kernel_sha_update(&context, pad, sizeof pad);
+    if (first_length != 0u) recomp_kernel_sha_update(&context, first, first_length);
+    if (second_length != 0u) recomp_kernel_sha_update(&context, second, second_length);
+    recomp_kernel_sha_final(&context, inner);
+
+    for (unsigned i = 0u; i < sizeof pad; ++i) pad[i] ^= 0x36u ^ 0x5cu;
+    recomp_kernel_sha_init(&context);
+    recomp_kernel_sha_update(&context, pad, sizeof pad);
+    recomp_kernel_sha_update(&context, inner, sizeof inner);
+    recomp_kernel_sha_final(&context, digest);
+}
+
+void recomp_kernel_rc4_key(
+    RecompRc4Context *context, const uint8_t *key, uint32_t key_length)
+{
+    if (context == NULL || key == NULL || key_length == 0u) return;
+    for (unsigned i = 0u; i < 256u; ++i) context->state[i] = (uint8_t)i;
+    uint8_t j = 0u;
+    for (unsigned i = 0u; i < 256u; ++i) {
+        j = (uint8_t)(j + context->state[i] + key[i % key_length]);
+        uint8_t value = context->state[i];
+        context->state[i] = context->state[j];
+        context->state[j] = value;
+    }
+    context->i = context->j = 0u;
+}
+
+void recomp_kernel_rc4_crypt(RecompRc4Context *context, uint8_t *input, uint32_t length)
+{
+    if (context == NULL || (input == NULL && length != 0u)) return;
+    for (uint32_t n = 0u; n < length; ++n) {
+        context->i = (uint8_t)(context->i + 1u);
+        context->j = (uint8_t)(context->j + context->state[context->i]);
+        uint8_t value = context->state[context->i];
+        context->state[context->i] = context->state[context->j];
+        context->state[context->j] = value;
+        uint8_t index = (uint8_t)(context->state[context->i] + context->state[context->j]);
+        input[n] ^= context->state[index];
+    }
+}
+
 /* Move the context between the guest's flat memory and a host struct. The
    guest may hand the same context to a long chain of updates, so the state
    has to survive in guest memory between calls rather than in a host cache
@@ -265,12 +325,59 @@ static void bridge_xc_sha_final(void)
     kernel_return(2u, 0u);
 }
 
+/* XcHMAC(key, keyBytes, data1, bytes1, data2, bytes2, digest), void/ret 0x1C. */
+static void bridge_xc_hmac(void)
+{
+    uint32_t key = kernel_arg(1u), key_length = kernel_arg(2u);
+    uint32_t first = kernel_arg(3u), first_length = kernel_arg(4u);
+    uint32_t second = kernel_arg(5u), second_length = kernel_arg(6u);
+    uint32_t digest = kernel_arg(7u);
+
+    if (key_length > SHA1_BLOCK_BYTES) key_length = SHA1_BLOCK_BYTES;
+    if (digest != 0u && (key != 0u || key_length == 0u) &&
+        (first != 0u || first_length == 0u) &&
+        (second != 0u || second_length == 0u)) {
+        recomp_kernel_hmac(
+            key_length != 0u ? recomp_memory(key, key_length) : NULL, key_length,
+            first_length != 0u ? recomp_memory(first, first_length) : NULL, first_length,
+            second_length != 0u ? recomp_memory(second, second_length) : NULL, second_length,
+            recomp_memory(digest, RECOMP_SHA_DIGEST_BYTES));
+    }
+    kernel_return(7u, 0u);
+}
+
+/* Xbox's context is S[256], byte i, byte j; widening indices overruns it. */
+static void bridge_xc_rc4_key(void)
+{
+    uint32_t context = kernel_arg(1u), length = kernel_arg(2u), key = kernel_arg(3u);
+    if (context != 0u && key != 0u && length != 0u) {
+        /* The 256-step key schedule reads at most 256 bytes. */
+        uint32_t key_bytes = length < 256u ? length : 256u;
+        recomp_kernel_rc4_key((RecompRc4Context *)recomp_memory(context, RECOMP_RC4_CONTEXT_BYTES),
+            recomp_memory(key, key_bytes), length);
+    }
+    kernel_return(3u, 0u);
+}
+
+static void bridge_xc_rc4_crypt(void)
+{
+    uint32_t context = kernel_arg(1u), length = kernel_arg(2u), input = kernel_arg(3u);
+    if (context != 0u && (input != 0u || length == 0u)) {
+        recomp_kernel_rc4_crypt((RecompRc4Context *)recomp_memory(context, RECOMP_RC4_CONTEXT_BYTES),
+            length != 0u ? recomp_memory(input, length) : NULL, length);
+    }
+    kernel_return(3u, 0u);
+}
+
 RecompFunction recomp_kernel_crypto(uint32_t ordinal)
 {
     switch (ordinal) {
     case 335u: return bridge_xc_sha_init;
     case 336u: return bridge_xc_sha_update;
     case 337u: return bridge_xc_sha_final;
+    case 338u: return bridge_xc_rc4_key;
+    case 339u: return bridge_xc_rc4_crypt;
+    case 340u: return bridge_xc_hmac;
     default: return NULL;
     }
 }

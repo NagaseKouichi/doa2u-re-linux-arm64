@@ -3,9 +3,8 @@
 
 #include <stddef.h>
 
-/* The 119 xboxkrnl ordinals this XBE imports. Names cross-checked against the
-   Cxbx-Reloaded thunk table, which independently reproduces every mapping this
-   project had already established from runtime evidence. */
+/* Known Xbox kernel export names, cross-checked against Cxbx-Reloaded.
+   This catalog is independent of the selected XBE's import inventory. */
 static const struct {
     uint32_t ordinal;
     const char *name;
@@ -74,6 +73,7 @@ static const struct {
     {178u, "MmPersistContiguousMemory"},
     {179u, "MmQueryAddressProtect"},
     {180u, "MmQueryAllocationSize"},
+    {181u, "MmQueryStatistics"},
     {182u, "MmSetAddressProtect"},
     {184u, "NtAllocateVirtualMemory"},
     {187u, "NtClose"},
@@ -102,6 +102,8 @@ static const struct {
     {238u, "NtYieldExecution"},
     {246u, "ObReferenceObjectByHandle"},
     {250u, "ObfDereferenceObject"},
+    {252u, "PhyGetLinkState"},
+    {253u, "PhyInitialize"},
     {255u, "PsCreateSystemThreadEx"},
     {258u, "PsTerminateSystemThread"},
     {259u, "PsThreadObjectType"},
@@ -125,6 +127,9 @@ static const struct {
     {335u, "XcSHAInit"},
     {336u, "XcSHAUpdate"},
     {337u, "XcSHAFinal"},
+    {338u, "XcRC4Key"},
+    {339u, "XcRC4Crypt"},
+    {340u, "XcHMAC"},
     {354u, "XboxAlternateSignatureKeys"},
     {356u, "HalBootSMCVideoMode"},
     {358u, "HalIsResetOrShutdownPending"},

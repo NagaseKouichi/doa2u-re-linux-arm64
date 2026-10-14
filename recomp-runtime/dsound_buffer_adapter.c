@@ -2,6 +2,8 @@
 #include "dsound_buffer_adapter.h"
 #include "dsound_api_adapter.h"
 #include "dsound_buffer_model.h"
+#include "dsound_mix_model.h"
+#include "dsound_effects_adapter.h"
 #include "audio_output.h"
 #include "xbox_adpcm.h"
 #include "xapi_time_adapter.h"
@@ -19,6 +21,7 @@ typedef struct Buffer {
     int32_t volume;
     const uint8_t *pcm;
     RecompDsoundBufferModel model;
+    RecompDsoundMixModel mix;
 } Buffer;
 static Buffer buffers[BUFFER_COUNT];
 
@@ -84,6 +87,62 @@ static uint32_t source_cursor(const Buffer *buffer)
     return bytes / buffer->align * buffer->align;
 }
 
+static void apply_routing(Buffer *buffer)
+{
+    uint32_t headroom[32];
+    float dry[4], wet[4];
+    for (uint32_t i = 0u; i < 32u; ++i) headroom[i] = recomp_dsound_effects_headroom(i);
+    if (!recomp_dsound_mix_matrices(&buffer->mix, buffer->channels, headroom, dry, wet)) {
+        recomp_stop(2, "dsound:signal-route-unbound");
+    }
+    if (!recomp_audio_output_set_voice_routing((uint32_t)(buffer - buffers), buffer->channels, dry, wet)) {
+        recomp_stop(2, "dsound:routing-failed");
+    }
+}
+
+void recomp_dsound_buffers_refresh_routing(void)
+{
+    for (uint32_t i = 0u; i < BUFFER_COUNT; ++i) if (buffers[i].root) apply_routing(&buffers[i]);
+}
+
+static uint32_t read_mix(RecompDsoundMixModel *mix, uint32_t address, bool replace)
+{
+    if (!address) {
+        if (!replace) return RECOMP_DSOUND_POINTER_ERROR;
+        recomp_dsound_mix_default(mix);
+        return RECOMP_DSOUND_OK;
+    }
+    uint8_t *header = span(address, 8u);
+    uint32_t words[2];
+    if (!header) return RECOMP_DSOUND_POINTER_ERROR;
+    memcpy(words, header, sizeof words);
+    if (words[0] > 8u) return RECOMP_DSOUND_INVALID_PARAM;
+    RecompDsoundMixPair pairs[8];
+    uint8_t *data = words[0] ? span(words[1], words[0] * sizeof *pairs) : NULL;
+    if (words[0] && !data) return RECOMP_DSOUND_POINTER_ERROR;
+    if (words[0]) memcpy(pairs, data, words[0] * sizeof *pairs);
+    RecompDsoundMixModel next = *mix;
+    if (!recomp_dsound_mix_set(&next, pairs, words[0], replace)) return RECOMP_DSOUND_INVALID_PARAM;
+    uint32_t headroom[32] = {0};
+    float dry[4], wet[4];
+    if (!recomp_dsound_mix_matrices(&next, 2u, headroom, dry, wet)) {
+        recomp_stop(2, "dsound:signal-route-unbound");
+    }
+    *mix = next;
+    return RECOMP_DSOUND_OK;
+}
+
+static void write_mix(Buffer *buffer)
+{
+    write32(buffer->settings + 0x24u, buffer->mix.count);
+    for (uint32_t i = 0u; i < 8u; ++i) {
+        *recomp_memory_i8(buffer->settings + 0x28u + i) =
+            (int8_t)(i < buffer->mix.count ? buffer->mix.bins[i] : 0u);
+    }
+    memcpy(recomp_memory(buffer->settings + 0x30u, sizeof buffer->mix.volumes),
+        buffer->mix.volumes, sizeof buffer->mix.volumes);
+}
+
 static void pump(Buffer *buffer, uint64_t now)
 {
     if (!recomp_audio_output_ready()) recomp_stop(2, "dsound:audio-output-failed");
@@ -117,6 +176,7 @@ static void pump(Buffer *buffer, uint64_t now)
         if (offset == end) offset = buffer->model.loop_start_bytes;
     }
     if (!recomp_audio_output_ready()) recomp_stop(2, "dsound:audio-output-failed");
+    apply_routing(buffer);
     recomp_audio_output_submit((uint32_t)(buffer - buffers), pcm, bytes,
         buffer->model.sample_rate, buffer->channels, buffer->format == 0x69u ? 16u : buffer->bits,
         buffer->volume);
@@ -213,7 +273,7 @@ static void create_buffer(void)
     memcpy(desc, desc_span, sizeof desc);
     if (desc[0] != sizeof desc || kernel_arg(4u)) { kernel_return(4u, RECOMP_DSOUND_INVALID_PARAM); return; }
     if (desc[1] & 0x10u) recomp_stop(2, "dsound:buffer-3d-unbound");
-    if (desc[4] || desc[5]) recomp_stop(2, "dsound:buffer-mix-bins-unbound");
+    if (desc[5]) recomp_stop(2, "dsound:buffer-input-bin-unbound");
     if (desc[1] & ~0x400a0u) recomp_stop(2, "dsound:buffer-create-flags-unbound:%08x", desc[1]);
     uint8_t *format = span(desc[3], 18u);
     if (!format) { kernel_return(4u, result); return; }
@@ -234,6 +294,10 @@ static void create_buffer(void)
         kernel_return(4u, result); return;
     }
     uint32_t slot = 0u;
+    RecompDsoundMixModel mix;
+    recomp_dsound_mix_default(&mix);
+    result = read_mix(&mix, desc[4], true);
+    if (result != RECOMP_DSOUND_OK) { kernel_return(4u, result); return; }
     while (slot < BUFFER_COUNT && buffers[slot].root) ++slot;
     if (slot == BUFFER_COUNT) { kernel_return(4u, RECOMP_DSOUND_OUT_OF_MEMORY); return; }
     Buffer *buffer = &buffers[slot];
@@ -243,6 +307,7 @@ static void create_buffer(void)
         .rate = rate, .frequency = rate, .headroom = (desc[1] & 0x382010u) ? 0u : 600u};
     if (!buffer->root || !buffer->settings) { dispose(buffer); kernel_return(4u, RECOMP_DSOUND_OUT_OF_MEMORY); return; }
     buffer->volume = -(int32_t)buffer->headroom;
+    buffer->mix = mix;
     memset(recomp_memory(buffer->root, ROOT_SIZE), 0, ROOT_SIZE);
     memset(recomp_memory(buffer->settings, SETTINGS_SIZE), 0, SETTINGS_SIZE);
     write32(buffer->root, 0x46c1d8u);
@@ -255,6 +320,7 @@ static void create_buffer(void)
     write32(buffer->settings + 8u, buffer->flags);
     write32(buffer->settings + 0x1cu, (uint32_t)buffer->volume);
     write32(buffer->settings + 0x20u, buffer->headroom);
+    write_mix(buffer);
     result = set_data(buffer, 0u, desc[2]);
     if (result != RECOMP_DSOUND_OK) dispose(buffer);
     else { recomp_dsound_device_add_owner(); write32(output, buffer->root + PUBLIC_OFFSET); }
@@ -269,7 +335,7 @@ static uint32_t release_buffer(Buffer *buffer)
     return references;
 }
 
-enum Operation { RELEASE, DATA, LOCK, UNLOCK, PLAY, STOP, STOP_EX, STATUS, POSITION, SEEK, LOOP, FREQUENCY, VOLUME, HEADROOM };
+enum Operation { RELEASE, DATA, LOCK, UNLOCK, PLAY, STOP, STOP_EX, STATUS, POSITION, SEEK, LOOP, FREQUENCY, VOLUME, HEADROOM, MIX_BINS, MIX_VOLUMES };
 static void buffer_call(enum Operation operation, uint32_t arguments)
 {
     Buffer *buffer = buffer_at(kernel_arg(1u));
@@ -278,6 +344,10 @@ static void buffer_call(enum Operation operation, uint32_t arguments)
     uint32_t result = RECOMP_DSOUND_OK;
     uint64_t now = now_ms();
     switch (operation) {
+    case MIX_BINS: case MIX_VOLUMES:
+        result = read_mix(&buffer->mix, value, operation == MIX_BINS);
+        if (!result) { write_mix(buffer); apply_routing(buffer); }
+        break;
     case RELEASE: result = release_buffer(buffer); break;
     case DATA: result = set_data(buffer, value, kernel_arg(3u)); break;
     case LOCK: {
@@ -374,13 +444,12 @@ METHOD(unlock, UNLOCK, 5u) METHOD(play, PLAY, 4u) METHOD(stop, STOP, 1u)
 METHOD(stop_ex, STOP_EX, 4u) METHOD(status, STATUS, 2u) METHOD(position, POSITION, 3u)
 METHOD(seek, SEEK, 2u) METHOD(loop, LOOP, 3u) METHOD(frequency, FREQUENCY, 2u)
 METHOD(volume, VOLUME, 2u) METHOD(headroom, HEADROOM, 2u)
+METHOD(mix_bins, MIX_BINS, 2u) METHOD(mix_volumes, MIX_VOLUMES, 2u)
 static void private_release(void)
 {
     kernel_return(1u, release_buffer(buffer_at(kernel_arg(1u) + PUBLIC_OFFSET)));
 }
 static void unbound_3d(void) { recomp_stop(2, "dsound:buffer-3d-unbound"); }
-static void unbound_mix_bins(void) { recomp_stop(2, "dsound:buffer-mix-bins-unbound"); }
-static void unbound_mix_volumes(void) { recomp_stop(2, "dsound:buffer-mix-volumes-unbound"); }
 static void unbound_stream(void) { recomp_stop(2, "dsound:stream-unbound"); }
 
 RecompFunction recomp_dsound_buffer_lookup_manual(uint32_t address)
@@ -393,7 +462,7 @@ RecompFunction recomp_dsound_buffer_lookup_manual(uint32_t address)
     case 0x364882u: return status; case 0x36489eu: return position; case 0x3648beu: return seek;
     case 0x364862u: return loop; case 0x365121u: return frequency;
     case 0x3647aeu: return volume; case 0x3647cau: return headroom;
-    case 0x3647e6u: return unbound_mix_volumes; case 0x36513du: return unbound_mix_bins;
+    case 0x3647e6u: return mix_volumes; case 0x36513du: return mix_bins;
     case 0x365159u: case 0x36517du: case 0x3651a1u: case 0x3651d6u:
     case 0x36520bu: case 0x36522fu: return unbound_3d;
     case 0x363f70u: case 0x363fb7u: case 0x364005u: case 0x364104u:

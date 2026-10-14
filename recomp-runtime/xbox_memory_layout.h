@@ -26,6 +26,11 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 void xbox_HeapFree(uint32_t guest_address);
 uint32_t xbox_HeapCheckpoint(void);
 bool xbox_HeapRestore(uint32_t checkpoint);
+typedef struct XboxHeapSnapshot {
+    uint32_t image_bytes;
+    uint32_t available_pages;
+} XboxHeapSnapshot;
+XboxHeapSnapshot xbox_HeapSnapshot(void);
 uint32_t xbox_ContiguousAlloc(
     uint32_t size,
     uint32_t lowest_address,
