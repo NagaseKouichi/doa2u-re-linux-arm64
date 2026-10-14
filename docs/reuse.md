@@ -36,7 +36,11 @@ frame models. Its 5849 device, resource, viewport, tile, gamma and lighting
 bindings are separate. No DOA3/DOAXBV static device, surface address, push
 buffer or game-state hook is enabled. Capture and real presenter lifecycle
 tests cover the reused host; synthetic API tests cover the new guest layout.
-Audio and input hosts remain unbound.
+The audio pass brings over the committed DOA3 XAudio2 PCM/capture host and
+the independent buffer clock. It excludes the sister manager/APU layouts,
+opaque unmapped handles and effects-download success stub. New 5849 bindings
+own device/buffer views and headroom/data/reference contracts. Host status
+distinguishes explicit mute from device failure. Input remains unbound.
 
 ## Good next candidates, with work required
 

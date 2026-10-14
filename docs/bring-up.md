@@ -3,7 +3,7 @@
 ## Established baseline
 
 The project has public source, synthetic tests, custody checks, a pinned
-lifter and a native kernel/D3D8 runner. The actual selected game has been lifted;
+lifter and a native kernel/graphics/audio runner. The actual game has been lifted;
 its generated source and receipt remain private. Library API replacements
 and game compatibility remain bring-up work.
 
@@ -78,11 +78,34 @@ APIs. The borrowed-texture capture limitation inherited from the presenter
 must be resolved before relying on queued non-linear texture uploads.
 No title/menu acceptance is established by these model contracts.
 
-The current explicit library frontier is `dsound:create-device-unbound`.
-DirectSoundCreate needs a native audio-device replacement; its generated
-factory reaches APU interrupts and MMIO. Keep that whole-library boundary
-until its 5849 object and service contracts are verified. Private notes hold
-actual graphics and boot observations.
+## Audio API contract
+
+`dsound_api_adapter.c` owns the 5849 DirectSound device singleton and its
+public interior handle. Native caller/buffer ownership replaces the SDK's
+internal hardware voices while preserving visible reference results. The
+shared XAudio2 backend owns copied PCM storage. Explicit mute keeps timing
+available; host/device failures cannot report native readiness. Shutdown
+requires the COM initialization owner thread.
+
+The buffer adapter binds the 5849 descriptor and public handle layout to
+the independent cursor model, PCM/Xbox ADPCM decoding and native output.
+Owned and borrowed sample storage have separate lifetimes. Headroom changes
+adjust effective volume; API argument cleanup is verified per entry.
+The initial subset is non-3D buffers with synchronous polling/DoWork pumping.
+The inherited clock drops output spans after a stall over 100 ms while
+advancing its cursor. Native endpoint consumption has an opt-in host test;
+synthetic API and backend tests remain suitable for public CI.
+
+The current explicit library frontier is `dsound:effects-image-unbound`.
+The effects image contains encoded state and descriptor maps required by
+later middleware. A successful download requires verified image decoding,
+owned guest-readable maps/state and native effects/routing. Returning a null
+descriptor with success would hide a required contract. Keep the stop at the
+whole API until that replacement exists; do not expose DSP MMIO pointers.
+
+Streams need packet/callback scheduling. 3D controls, mix-bin routing,
+scheduled StopEx, additional play flags and custom effects remain guarded.
+Private notes hold actual graphics/audio startup and boot observations.
 
 ## Remaining bring-up
 
@@ -94,8 +117,9 @@ actual graphics and boot observations.
    scaffold; fix translator defects in the lifter and regenerate.
 3. Verify additional indirect targets and function bounds against the selected
    Ghidra program and private identity receipt when a run reaches them.
-4. Rebind DirectSound and CRI services, then XAPI input/fibers. Verify native
-   audio objects, movies, polling and worker scheduling against natural runs.
+4. Replace effects-image decoding/routing and CRI services, then XAPI
+   input/fibers. Verify native audio, movies, polling and worker scheduling
+   against natural runs.
 5. Bind additional D3D8 resources, shaders and draws through the semantic
    presenter. Verify title/menu entry and the first natural fight.
 

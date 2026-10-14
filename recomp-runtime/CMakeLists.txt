@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
+option(RECOMP_NATIVE_AUDIO_TEST "Test PCM consumption on an installed audio endpoint" OFF)
 
 # These targets use synthetic fixtures, with no guest address bindings.
 add_executable(recomp_model_test
@@ -54,6 +55,17 @@ if(NOT MSVC)
 endif()
 add_test(NAME recomp-runtime-dsound-hrtf COMMAND recomp_dsound_hrtf_test)
 
+add_executable(recomp_dsound_buffer_test dsound_buffer_model.c dsound_buffer_model_test.c)
+add_test(NAME recomp-runtime-dsound-buffer COMMAND recomp_dsound_buffer_test)
+add_executable(recomp_dsound_device_test dsound_device_model.c dsound_device_model_test.c)
+add_test(NAME recomp-runtime-dsound-device COMMAND recomp_dsound_device_test)
+add_executable(recomp_dsound_api_test dsound_api_adapter.c dsound_device_model.c dsound_api_adapter_test.c)
+add_test(NAME recomp-runtime-dsound-api COMMAND recomp_dsound_api_test)
+add_executable(recomp_dsound_buffer_api_test dsound_buffer_adapter.c dsound_buffer_adapter_test.c
+    dsound_buffer_model.c xbox_adpcm.c)
+target_compile_definitions(recomp_dsound_buffer_api_test PRIVATE RECOMP_DSOUND_TEST_CLOCK)
+add_test(NAME recomp-runtime-dsound-buffer-api COMMAND recomp_dsound_buffer_api_test)
+
 add_executable(recomp_save_transaction_test save_transaction.cpp save_transaction_test.cpp)
 add_test(NAME recomp-runtime-save-transaction COMMAND recomp_save_transaction_test)
 
@@ -65,6 +77,20 @@ target_compile_definitions(recomp_input_pulse_source_test PRIVATE RECOMP_INPUT_P
 add_test(NAME recomp-runtime-input-pulses COMMAND recomp_input_pulse_source_test)
 
 if(WIN32)
+    add_library(recomp_audio STATIC audio_output_xaudio2.cpp audio_capture_xapo.cpp)
+    target_include_directories(recomp_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(recomp_audio PUBLIC xaudio2 xapobase ole32)
+    add_executable(recomp_audio_output_test audio_output_xaudio2_test.cpp)
+    add_test(NAME recomp-runtime-audio-output COMMAND recomp_audio_output_test)
+    add_executable(recomp_audio_capture_test audio_capture_xapo_test.cpp)
+    target_link_libraries(recomp_audio_capture_test PRIVATE xapobase)
+    add_test(NAME recomp-runtime-audio-capture COMMAND recomp_audio_capture_test)
+    add_executable(recomp_audio_host_test audio_output_xaudio2_host_test.cpp)
+    target_link_libraries(recomp_audio_host_test PRIVATE xaudio2 xapobase ole32)
+    if(RECOMP_NATIVE_AUDIO_TEST)
+        add_test(NAME recomp-runtime-audio-host COMMAND recomp_audio_host_test)
+        set_tests_properties(recomp-runtime-audio-host PROPERTIES TIMEOUT 10)
+    endif()
     add_executable(recomp_d3d_vblank_test d3d_vblank.cpp xapi_clock.cpp d3d_vblank_test.cpp)
     add_test(NAME recomp-runtime-d3d-vblank COMMAND recomp_d3d_vblank_test)
     add_test(NAME recomp-runtime-unpaced COMMAND "${CMAKE_COMMAND}" -E env
@@ -217,11 +243,13 @@ if(RECOMP_PROGRAM_DIR)
     add_executable(recomp_program_runner runner.cpp program_adapters.c program_manual.c
         d3d8_adapter.c d3d8_state_adapter.c d3d_device_model.c d3d_light_model.c
         d3d_frame_model.c d3d_tile_model.c
+        dsound_api_adapter.c dsound_device_model.c dsound_buffer_adapter.c
+        dsound_buffer_model.c xbox_adpcm.c
         host_diagnostics.cpp "${_missing_source}" ${_program_sources})
     target_compile_definitions(recomp_program_runner PRIVATE RECOMP_XBE_SHA256="${_xbe_sha256}")
     if(MSVC)
         target_compile_options(recomp_program_runner PRIVATE /we4013)
     endif()
-    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe recomp_d3d_presenter dbghelp)
+    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe recomp_d3d_presenter recomp_audio dbghelp)
     target_include_directories(recomp_program_runner PRIVATE "${_derived_dir}")
 endif()

@@ -73,5 +73,10 @@
     ".sav",
     ".jsonl"
   ],
-  "byte_literal_exceptions": []
+  "byte_literal_exceptions": [
+    {
+      "sha256": "de346b217c24b4ae309bf87684207ac728a6e7e9527122403bf34ec9e7595d03",
+      "reason": "Class ID of the runtime's own audio capture XAPO in audio_capture_xapo.cpp, copied from committed DOA3 public source."
+    }
+  ]
 }

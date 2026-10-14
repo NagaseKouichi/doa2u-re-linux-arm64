@@ -9,7 +9,9 @@ and `docs/bring-up.md` before starting a game lift or runner.
 `recomp-runtime/` contains the shared core, kernel host, runner and synthetic
 tests. `recomp_lookup_manual()` binds XAPI kernel lifetime and the initial
 D3D8 5849 device, frame and state APIs to the shared D3D11 presenter.
-DirectSound creation stops at `dsound:create-device-unbound`.
+DirectSound 5849 owns native device/buffer lifetime and PCM output.
+Effects-image download stops at `dsound:effects-image-unbound`.
+Read the audio limits in `docs/bring-up.md` before extending this adapter.
 Read the graphics limits in `docs/bring-up.md` before extending this adapter.
 Before enabling another adapter,
 verify the selected DOA2U executable identity, function address, calling

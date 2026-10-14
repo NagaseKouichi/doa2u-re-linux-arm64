@@ -28,8 +28,10 @@ point/directional lights and fog state. It reuses the sister projects'
 semantic presenter.
 
 The graphics adapter supports the verified 720x480 startup mode. Additional
-resources, shaders and draw bindings remain work, as do audio and input.
-DirectSound creation stops explicitly at `dsound:create-device-unbound`.
+resources, shaders and draw bindings remain work, as does input.
+The initial DirectSound 5849 adapter uses XAudio2 for PCM/Xbox ADPCM buffers,
+including data ownership, reference counts, headroom, looping and cursors.
+Effects-image download stops explicitly at `dsound:effects-image-unbound`.
 Passing synthetic tests does not establish title-screen or gameplay
 compatibility.
 
@@ -47,6 +49,10 @@ cmake -S recomp-runtime -B build/recomp-runtime
 cmake --build build/recomp-runtime --config Debug
 ctest --test-dir build/recomp-runtime -C Debug --output-on-failure
 ```
+
+To also test real PCM consumption on this PC's audio endpoint, configure with
+`-DRECOMP_NATIVE_AUDIO_TEST=ON`. That test mutes its host mastering voice and
+requires a working endpoint; the default synthetic tests need no sound device.
 
 ## Import another local disc
 
