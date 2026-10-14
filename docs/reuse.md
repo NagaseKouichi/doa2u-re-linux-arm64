@@ -19,7 +19,16 @@ private inputs, generated code and caches were excluded.
 
 `runtime.h` and the input/presenter model headers are retained as dependencies
 of these tests. Their presence does not supply a complete runtime or renderer.
-`program_manual.c` starts with no guest bindings.
+The initial snapshot kept `program_manual.c` empty. Bring-up now includes one
+verified XAPI kernel-compatibility entry; the native host owns kernel lifetime
+instead of patching a retail kernel PE or registering its INIT/LDT segment.
+
+The next bring-up pass also reused the core register runtime, kernel dispatch,
+files, memory, crypto, thread scheduler, stop reports and read-only XBE parser.
+The new loader and allocator reserve bootstrap state beyond the selected
+image. The runner has no sister-game startup hooks, library address bindings,
+graphics backend or audio host enabled. Additional MMX helper coverage is
+required by this lift rather than by a copied game-specific hook.
 
 ## Good next candidates, with work required
 
@@ -46,8 +55,9 @@ a drop-in runner for this title.
   presentation behavior. Their launchers, recipes and generated forwarders
   need replacement rather than a title string change.
 - The selected DOA2U image exceeds DOA3's reserved kernel-data and fixed
-  heap-start boundaries. The allocator and memory layout were therefore
-  excluded. Establish a non-overlapping layout before any game execution.
+  heap-start boundaries. The initial allocator was excluded; the bring-up
+  allocator now derives its start from the loaded image and reserves
+  bootstrap state in the final MiB of guest RAM.
 - Some tests named `*_model_test` also execute address adapters. Only the
   independent suites were retained.
 - DOA3 collision logic and DOAXBV vacation, animation and idle-mode hooks

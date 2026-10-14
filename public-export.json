@@ -21,7 +21,13 @@
     "tools/test_extract_iso.py",
     "tools/public_export.py",
     "tools/xbe_info.py",
-    "tools/xboxrecomp"
+    "tools/xboxrecomp",
+    "xbe/**",
+    "tools/build_game.py",
+    "tools/test_build_game.py",
+    "tools/run_game.py",
+    "tools/test_run_game.py",
+    "tools/doa2u/seed_functions.json"
   ],
   "quarantine": [
     "decomp/**",

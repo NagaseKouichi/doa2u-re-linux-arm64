@@ -6,8 +6,10 @@ Build a native Windows port of Dead or Alive 2 Ultimate (Xbox), then replace
 generated game-owned logic with readable source. Read `CONTEXT.md` for scope
 and `docs/bring-up.md` before starting a game lift or runner.
 
-`recomp-runtime/` contains selected shared modules and synthetic tests.
-`recomp_lookup_manual()` is deliberately empty. Before enabling an adapter,
+`recomp-runtime/` contains the shared core, kernel host, runner and synthetic
+tests. `recomp_lookup_manual()` has a verified XAPI kernel-lifetime seam.
+Its D3D8 creation entry stops explicitly until the host adapter exists.
+Before enabling another adapter,
 verify the selected DOA2U executable identity, function address, calling
 convention and object layout. DOA3 and DOAXBV bindings are references only.
 

@@ -1,0 +1,10 @@
+[
+  {
+    "start": "0x003B8604",
+    "note": "XPP initializer-table callback"
+  },
+  {
+    "start": "0x003B8E42",
+    "note": "XPP initializer-table callback without a standard prologue"
+  }
+]

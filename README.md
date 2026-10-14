@@ -20,10 +20,15 @@ The main executable records XDK, D3D8 and DirectSound build 5849. DOA3 uses
 3911/3925/3936 and DOAXBV uses 4928, so their library address bindings cannot
 be reused unchanged.
 
-The starter builds synthetic tests for shared models, audio helpers, input
-pulses, controller settings, save transactions and frame pacing. No game
-runner or whole-program lift exists yet. Passing these tests does not establish
-DOA2U boot, rendering, sound or gameplay compatibility.
+The whole-program lift and a kernel-only native runner are in place. The
+runtime loads the selected executable, binds kernel imports, initializes TLS,
+and schedules guest threads. Graphics, audio and input API adapters are not
+enabled yet. Passing synthetic tests does not establish rendering, sound or
+gameplay compatibility.
+
+The runner stops explicitly at `d3d8:create-device-unbound` until the 5849
+native device/presenter adapter is implemented. It does not report a created
+device or attempt to emulate the GPU registers below that API.
 
 Read [reuse](docs/reuse.md) for the source provenance and what can be brought
 over next, and [bring-up](docs/bring-up.md) for the next implementation steps.
@@ -53,6 +58,25 @@ python tools/extract_iso.py <your-disc.iso> --output private/new-import
 
 The source ISO remains in its original location. Extract one disc once and
 reuse it; future play folders should use hardlinks instead of copying it.
+
+## Lift and probe the selected game
+
+The ignored `private/target.json` supplies the game executable path and hash.
+The runner rejects any executable that differs from its compiled identity.
+Initialize the lifter submodule and use the locally selected Capstone version:
+
+```powershell
+git submodule update --init tools/xboxrecomp
+python -m pip install capstone==5.0.7
+python tools/build_game.py
+python tools/run_game.py --seconds 30
+```
+
+After a runtime change, `python tools/build_game.py --build-only` reuses the
+authenticated lift. `--lift-only` generates without building. Generated C,
+analysis and build receipts stay in `private/program/`; boot logs stay in
+`private/boot-logs/`. The probe creates `private/play-disc` with hardlinks,
+preserves its saves, and reports a timeout as termination of the probe.
 
 ## Layout
 
