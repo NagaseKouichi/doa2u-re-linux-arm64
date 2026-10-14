@@ -17,6 +17,14 @@ Follow the sister projects' D3D11 presentation seam; do not build an NV2A
 emulator. Replace library code wholesale; decompile only game-owned logic.
 Document temporary seams beside their manual lookup.
 
+## Ghidra
+
+Pass `program_name="/DOA2.xbe"` on every program-scoped GhidrAssistMCP
+call for the main game. Before analysis, call `list_binaries` and verify
+the target's Project Path and executable identity. If renamed or
+reimported, resolve its new path; never rely on the active tab.
+`program_name="/DOA2U-default.xbe"` is for launcher analysis only.
+
 ## Custody and disk use
 
 1. Never hand-edit generated C. Fix the pinned lifter and regenerate locally.
