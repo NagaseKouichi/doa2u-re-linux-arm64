@@ -49,6 +49,11 @@ and teardown failures. Original SDK decoder comparisons remain private.
 
 ## Good next candidates, with work required
 
+The frame-state pass reuses DOA3's fixed-function declaration builder, and
+the fiber pass ports DOA3's native fiber adapter from committed source at
+`5d350856dff80141491bb5569cf6730c4466fef4`. Both keep only the DOA2U 5849
+addresses and TLS layout; DOA3's binding tables and DOAXBV probes stay out.
+
 | Candidate | Reusable part | DOA2U work |
 | --- | --- | --- |
 | Kernel and startup | Ordinal dispatch, files, memory, crypto, threads and cooperative scheduler | Verify exports, launch behavior, TLS and memory allocation against the actual image |

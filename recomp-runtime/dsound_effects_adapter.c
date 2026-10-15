@@ -164,6 +164,9 @@ static void set_effect_data(void)
 
 static uint32_t commit_listener(void)
 {
+    /* shortcut: 3D buffers stay guarded, so listener position/velocity have
+       no native effect yet; commit retires their dirty bits like the SDK. */
+    *recomp_memory_u32(settings_address() + 0x30u) &= ~3u;
     if (!listener_dirty) return RECOMP_DSOUND_OK;
     if (locations[0] == NO_EFFECT) return INVALID_EFFECT;
     if (!recomp_audio_output_set_reverb(&pending_listener)) {
@@ -203,6 +206,21 @@ static void commit(void)
     kernel_return(1u, commit_listener());
 }
 
+/* Device SetPosition/SetVelocity(device, x, y, z, apply), ret 0x14. */
+static void set_listener_vector(uint32_t offset, uint32_t dirty)
+{
+    recomp_dsound_require_device(kernel_arg(1u));
+    const uint32_t settings = settings_address();
+    for (uint32_t i = 0u; i < 3u; ++i) {
+        *recomp_memory_u32(settings + offset + i * 4u) = kernel_arg(2u + i);
+    }
+    *recomp_memory_u32(settings + 0x30u) |= dirty;
+    kernel_return(5u, (kernel_arg(5u) & 1u) ? RECOMP_DSOUND_OK : commit_listener());
+}
+
+static void set_position(void) { set_listener_vector(0x38u, 1u); }
+static void set_velocity(void) { set_listener_vector(0x44u, 2u); }
+
 static void headroom(void)
 {
     recomp_dsound_require_device(kernel_arg(1u));
@@ -221,6 +239,8 @@ RecompFunction recomp_dsound_effects_lookup_manual(uint32_t address)
     case 0x00365c6eu: return commit;
     case 0x0036604au: return set_listener;
     case 0x0036478eu: return headroom;
+    case 0x00365fe0u: return set_position;
+    case 0x00366015u: return set_velocity;
     default: return NULL;
     }
 }

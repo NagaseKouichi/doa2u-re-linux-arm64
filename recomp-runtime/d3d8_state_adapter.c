@@ -2,6 +2,7 @@
 #include "d3d8_state_adapter.h"
 #include "d3d8_adapter.h"
 #include "d3d_light_model.h"
+#include "d3d_vertex_shader_model.h"
 #include "kernel_abi.h"
 #include "stop_report.h"
 
@@ -10,6 +11,18 @@
 enum {
     D3D_DIRTY = 0x00355058u,
     D3D_FOG_COLOR = 0x00355488u,
+    G_FILL_MODE = 0x0035548cu,
+    G_NORMALIZE = 0x00355498u,
+    G_ZENABLE = 0x0035549cu,
+    G_STENCIL = 0x003554a0u,
+    G_CULL = 0x003554acu,
+    G_EDGE_AA = 0x003554bcu,
+    G_MSAA = 0x003554c0u,
+    DEV_DECLARATION = 0x794u,
+    DEV_SHADER_HANDLE = 0x798u,
+    DEV_PROGRAM_SLOT = 0x79cu,
+    DEV_MATERIAL = 0xf00u,
+    DEV_TEXTURE_STAGE = 0xf88u,
     D3D_OUT_OF_MEMORY = 0x8007000eu,
 };
 
@@ -194,24 +207,131 @@ static void light_enable(void)
     kernel_return(2u, 0u);
 }
 
-static void vertex_shader_unbound(void)
+static void set_vertex_shader(void)
+{
+    uint32_t device = recomp_d3d8_require_device();
+    uint32_t handle = kernel_arg(1u);
+    /* shortcut: odd handles select programmable declaration/program paths;
+       bind them with the shader-draw producer. */
+    if ((handle & 1u) != 0u) recomp_stop(2, "d3d8:programmable-shader-unbound:%08x", handle);
+    uint32_t declaration = *recomp_memory_u32(device + DEV_DECLARATION);
+    if (declaration == 0u) recomp_stop(2, "d3d8:missing-declaration");
+    const uint32_t old_flags = *recomp_memory_u32(declaration + 4u);
+    const uint32_t old_mask = *recomp_memory_u32(declaration + 0x10u);
+    uint32_t *image = (uint32_t *)(void *)recomp_memory(
+        RECOMP_D3D_DEFAULT_DECLARATION, RECOMP_D3D_VERTEX_DECLARATION_SIZE);
+    if (!recomp_d3d_build_fixed_function_declaration(handle, image)) {
+        recomp_stop(2, "d3d8:invalid-fvf:%08x", handle);
+    }
+    uint32_t dirty = *recomp_memory_u32(D3D_DIRTY) | 0x70u;
+    if (old_mask != *recomp_memory_u32(RECOMP_D3D_DEFAULT_DECLARATION + 0x10u)) dirty |= 0x400u;
+    if (old_flags != *recomp_memory_u32(RECOMP_D3D_DEFAULT_DECLARATION + 4u)) dirty |= 0x1600u;
+    *recomp_memory_u32(D3D_DIRTY) = dirty;
+    *recomp_memory_u32(device + DEV_DECLARATION) = RECOMP_D3D_DEFAULT_DECLARATION;
+    *recomp_memory_u32(device + DEV_SHADER_HANDLE) = handle;
+    *recomp_memory_u32(device + DEV_PROGRAM_SLOT) = 0u;
+    kernel_return(1u, 0u);
+}
+
+static void set_render_state_simple(void)
+{
+    /* Fastcall (method in ECX, value in EDX), plain ret. These are console
+       GPU register writes; the game keeps its own semantic shadows, which a
+       future draw producer reads. No native effect until then. */
+    recomp_d3d8_require_device();
+    recomp_runtime.registers.esp += 4u;
+}
+
+static void set_state_global(uint32_t address, uint32_t accepted)
 {
     recomp_d3d8_require_device();
-    /* shortcut: bind FVF/program state with the remaining 5849 frame setup;
-       the SDK push-buffer path waits for hardware this native host lacks. */
-    recomp_stop(2, "d3d8:vertex-shader-unbound:%08x", kernel_arg(1u));
+    const uint32_t value = kernel_arg(1u);
+    if (accepted != 0u && value > accepted) {
+        recomp_stop(2, "d3d8:unsupported-state-value:%08x:%08x", address, value);
+    }
+    *recomp_memory_u32(address) = value;
+    kernel_return(1u, 0u);
+}
+
+/* Runtime MSAA changes need presenter recreation; only the created mode is accepted. */
+static void multi_sample_anti_alias(void) { set_state_global(G_MSAA, 0u); }
+static void z_enable(void) { set_state_global(G_ZENABLE, 2u); }
+static void stencil_enable(void) { set_state_global(G_STENCIL, 1u); }
+static void edge_anti_alias(void) { set_state_global(G_EDGE_AA, 1u); }
+static void cull_mode(void) { set_state_global(G_CULL, 3u); }
+
+static void fill_mode(void)
+{
+    recomp_d3d8_require_device();
+    const uint32_t value = kernel_arg(1u);
+    /* D3DFILL_POINT/SOLID/WIREFRAME; the SDK forwards SOLID when a
+       fill-mode override global is active. Only the shadow is semantic. */
+    if (value != 0x1b00u && value != 0x1b01u && value != 0x1b02u) {
+        recomp_stop(2, "d3d8:unsupported-fill-mode:%08x", value);
+    }
+    *recomp_memory_u32(G_FILL_MODE) = value;
+    kernel_return(1u, 0u);
+}
+
+static void normalize_normals(void)
+{
+    recomp_d3d8_require_device();
+    const uint32_t value = kernel_arg(1u);
+    if (value > 1u) recomp_stop(2, "d3d8:unsupported-normalize:%08x", value);
+    *recomp_memory_u32(G_NORMALIZE) = value;
+    *recomp_memory_u32(D3D_DIRTY) |= 0x200u;
+    kernel_return(1u, 0u);
+}
+
+static void set_material(void)
+{
+    uint32_t device = recomp_d3d8_require_device();
+    const uint32_t source = kernel_arg(1u);
+    /* D3DMATERIAL8 is 17 DWORDs; recomp_guest_memcpy validates the span. */
+    if (source == 0u) recomp_stop(2, "d3d8:material-pointer");
+    recomp_guest_memcpy(device + DEV_MATERIAL, source, 68u);
+    *recomp_memory_u32(D3D_DIRTY) |= 0x9000u;
+    kernel_return(1u, 0u);
+}
+
+static void set_texture(void)
+{
+    uint32_t device = recomp_d3d8_require_device();
+    const uint32_t stage = kernel_arg(1u), texture = kernel_arg(2u);
+    if (stage >= 4u) recomp_stop(2, "d3d8:texture-stage:%u", stage);
+    /* shortcut: non-null textures need 5849 resource addref/release and
+       native upload; bind them with the texture/draw producer. */
+    if (texture != 0u) recomp_stop(2, "d3d8:texture-unbound:%08x", texture);
+    const uint32_t slot = device + DEV_TEXTURE_STAGE + stage * 4u;
+    if (*recomp_memory_u32(slot) != 0u) {
+        recomp_stop(2, "d3d8:texture-release-unbound");
+    }
+    *recomp_memory_u32(device + 0xcu + stage * 4u) = 0x80000000u;
+    *recomp_memory_u32(D3D_DIRTY) |= 0x4800u;
+    kernel_return(2u, 0u);
 }
 
 RecompFunction recomp_d3d8_state_lookup_manual(uint32_t address)
 {
-    /* Verified 5849 API entries; spot lights and >8 active lights stop explicitly. */
+    /* Verified 5849 API entries; spot lights, >8 active lights, programmable
+       shaders, non-null textures and unsupported state values stop explicitly. */
     switch (address) {
     case 0x00344180u: return set_gamma;
     case 0x00344210u: return set_transform;
+    case 0x003443a0u: return set_material;
+    case 0x00345490u: return set_texture;
     case 0x003465c0u: return set_fog_color;
     case 0x00345040u: return set_light;
     case 0x00345300u: return light_enable;
-    case 0x00349320u: return vertex_shader_unbound;
+    case 0x00346240u: return set_render_state_simple;
+    case 0x00346540u: return edge_anti_alias;
+    case 0x00346610u: return cull_mode;
+    case 0x003466c0u: return normalize_normals;
+    case 0x00346930u: return fill_mode;
+    case 0x00347490u: return z_enable;
+    case 0x00347520u: return stencil_enable;
+    case 0x00347800u: return multi_sample_anti_alias;
+    case 0x00349320u: return set_vertex_shader;
     default: return NULL;
     }
 }

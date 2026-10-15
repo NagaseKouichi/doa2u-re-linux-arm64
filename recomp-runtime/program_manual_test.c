@@ -31,6 +31,12 @@ RecompFunction recomp_dsound_api_lookup_manual(uint32_t address)
     return NULL;
 }
 
+RecompFunction recomp_fiber_lookup_manual(uint32_t address)
+{
+    (void)address;
+    return NULL;
+}
+
 int main(void)
 {
     RecompFunction init_segment = recomp_lookup_manual(0x002bd531u);

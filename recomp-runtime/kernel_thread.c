@@ -3,6 +3,7 @@
 #include "xapi_time_adapter.h"
 #include "xbox_memory_layout.h"
 #include "native_fiber.h"
+#include "fiber_adapter.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +42,8 @@ typedef struct GuestThread {
     bool handle_closed;
     uint32_t object;
     void *native_fiber;
+    /* XAPI fiber current in this thread when it is switched out. */
+    uint32_t guest_fiber;
     RecompRegisters registers;
     RecompFpuContext fpu;
     uint32_t fs[0x60u / 4u];
@@ -309,10 +312,12 @@ static void switch_thread(unsigned index)
     outgoing->registers = recomp_runtime.registers;
     recomp_fpu_context_save(&outgoing->fpu);
     recomp_guest_load(outgoing->fs, XBOX_PCR_BASE, sizeof outgoing->fs);
+    outgoing->guest_fiber = recomp_fiber_thread_context();
     outgoing->native_fiber = recomp_native_fiber_current();
     recomp_runtime.registers = target->registers;
     recomp_fpu_context_restore(&target->fpu);
     recomp_guest_store(XBOX_PCR_BASE, target->fs, sizeof target->fs);
+    recomp_fiber_thread_restore(target->guest_fiber);
     current_thread = index;
     recomp_native_fiber_switch(target->native_fiber);
 }
@@ -509,6 +514,7 @@ static void bridge_ps_create_system_thread_ex(void)
     uint32_t stack_base = allocation + 0x200u + extension;
     uint32_t tls_slot = stack_base + stack_size;
     thread->entry = entry != 0u ? entry : context1;
+    thread->guest_fiber = 0u;
     thread->suspend_count = suspended != 0u;
     thread->priority = 8;
     thread->registers.esp = tls_slot - 12u;

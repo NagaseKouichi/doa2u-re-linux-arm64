@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "d3d8_adapter.h"
 #include "d3d_device_model.h"
+#include "d3d_vertex_shader_model.h"
 #include "d3d_frame_model.h"
 #include "d3d_tile_model.h"
 #include "d3d_vblank.h"
@@ -112,6 +113,17 @@ static void write_initial_device(void)
         }
     }
     *recomp_memory_u32(DEVICE + 0x2404u) = 1u;
+    /* SDK creation selects FVF 4 then FVF 2 through the public setter; replay
+       only the resulting shadows so later binds never read page zero. */
+    uint32_t *declaration = (uint32_t *)(void *)recomp_memory(
+        RECOMP_D3D_DEFAULT_DECLARATION, RECOMP_D3D_VERTEX_DECLARATION_SIZE);
+    if (!recomp_d3d_build_fixed_function_declaration(2u, declaration)) {
+        recomp_stop(2, "d3d8:default-declaration");
+    }
+    *recomp_memory_u32(DEVICE + 0x794u) = RECOMP_D3D_DEFAULT_DECLARATION;
+    *recomp_memory_u32(DEVICE + 0x798u) = 2u;
+    *recomp_memory_u32(DEVICE + 0x79cu) = 0u;
+    *recomp_memory_u32(0x00355058u) |= 0x70u;
 }
 
 static void validate_storage(const RecompD3dSurfaceHeader *surface)
@@ -347,6 +359,15 @@ static void block_until_vertical_blank(void)
     recomp_runtime.registers.esp += 4u;
 }
 
+/* Every SDK setter that is still unreplaced reserves console push-buffer
+   space here, then waits forever for GPU hardware this host lacks. Stop with
+   the caller's return address so the missing API is named immediately. */
+static void push_buffer_unbound(void)
+{
+    recomp_stop(2, "d3d8:push-buffer-unbound:ret=%08" PRIx32,
+        *recomp_memory_u32(recomp_runtime.registers.esp));
+}
+
 RecompFunction recomp_d3d8_lookup_manual(uint32_t address)
 {
     switch (address) {
@@ -361,6 +382,7 @@ RecompFunction recomp_d3d8_lookup_manual(uint32_t address)
     case 0x003459e0u: return set_tile;
     case 0x00347920u: return clear;
     case 0x0034af80u: return swap;
+    case 0x0034a310u: return push_buffer_unbound;
     /* CRI's no-argument tail aliases bypass generated callee lookup. */
     case 0x002fc300u: case 0x002fc5a0u: case 0x003444c0u: return block_until_vertical_blank;
     default: return NULL;

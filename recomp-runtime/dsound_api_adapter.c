@@ -162,8 +162,15 @@ static void do_work(void)
     recomp_runtime.registers.esp += 4u;
 }
 
-static void unsupported_device(void) { recomp_stop(2, "dsound:device-api-unbound"); }
-static void unsupported_stream(void) { recomp_stop(2, "dsound:stream-api-unbound"); }
+/* The return address names which unbound API the caller reached. */
+static void unsupported_device(void)
+{
+    recomp_stop(2, "dsound:device-api-unbound:ret=%08x", *recomp_memory_u32(recomp_runtime.registers.esp));
+}
+static void unsupported_stream(void)
+{
+    recomp_stop(2, "dsound:stream-api-unbound:ret=%08x", *recomp_memory_u32(recomp_runtime.registers.esp));
+}
 
 RecompFunction recomp_dsound_api_lookup_manual(uint32_t address)
 {
@@ -176,7 +183,6 @@ RecompFunction recomp_dsound_api_lookup_manual(uint32_t address)
     case 0x00363621u: return cooperative_level;
     case 0x00364721u: return speaker_config;
     case 0x0036492cu: return do_work;
-    case 0x00365fe0u: case 0x00366015u:
     case 0x00364955u: case 0x00363419u: return unsupported_device;
     case 0x00366257u: case 0x00363f70u: case 0x00363fb7u:
     case 0x00364005u: case 0x00364104u: case 0x00364155u:

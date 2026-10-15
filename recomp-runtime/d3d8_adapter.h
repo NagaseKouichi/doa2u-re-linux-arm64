@@ -5,6 +5,10 @@
 #include "runtime.h"
 #include "d3d_presenter.h"
 
+/* Verified 5849 library-static block holding the active fixed-function
+   vertex declaration image. */
+#define RECOMP_D3D_DEFAULT_DECLARATION 0x00357b80u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

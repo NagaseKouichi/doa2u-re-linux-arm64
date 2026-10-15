@@ -11,6 +11,7 @@ tests. `recomp_lookup_manual()` binds XAPI kernel lifetime and the initial
 D3D8 5849 device, frame and state APIs to the shared D3D11 presenter.
 DirectSound 5849 owns native device/buffer lifetime and PCM output.
 Effects-image download owns decoded maps/state and binds native I3DL2 reverb.
+XAPI fibers run on native Windows fibers through `fiber_adapter.c`.
 Recording sends, 3D crosstalk and additional DSP processing remain guarded.
 Read the audio limits in `docs/bring-up.md` before extending this adapter.
 Read the graphics limits in `docs/bring-up.md` before extending this adapter.

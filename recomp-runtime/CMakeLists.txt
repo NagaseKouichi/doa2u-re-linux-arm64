@@ -29,13 +29,17 @@ add_executable(recomp_manual_test program_manual.c program_manual_test.c)
 add_test(NAME recomp-runtime-unbound-lookups COMMAND recomp_manual_test)
 
 add_executable(recomp_d3d8_adapter_test d3d8_adapter.c d3d8_adapter_test.c
-    d3d_device_model.c d3d_frame_model.c d3d_tile_model.c)
+    d3d_device_model.c d3d_frame_model.c d3d_tile_model.c d3d_vertex_shader_model.c)
 add_test(NAME recomp-runtime-d3d8-adapter COMMAND recomp_d3d8_adapter_test)
 
-add_executable(recomp_d3d8_state_test d3d8_state_adapter.c d3d8_state_adapter_test.c d3d_light_model.c)
+add_executable(recomp_d3d8_state_test d3d8_state_adapter.c d3d8_state_adapter_test.c
+    d3d_light_model.c d3d_vertex_shader_model.c)
 add_test(NAME recomp-runtime-d3d8-state COMMAND recomp_d3d8_state_test)
 add_executable(recomp_d3d_light_test d3d_light_model.c d3d_light_model_test.c)
 add_test(NAME recomp-runtime-d3d-light COMMAND recomp_d3d_light_test)
+add_executable(recomp_d3d_vertex_declaration_test
+    d3d_vertex_shader_model.c d3d_vertex_shader_model_test.c)
+add_test(NAME recomp-runtime-d3d-vertex-declaration COMMAND recomp_d3d_vertex_declaration_test)
 if(NOT MSVC)
     target_link_libraries(recomp_model_test PRIVATE m)
     target_link_libraries(recomp_d3d8_adapter_test PRIVATE m)
@@ -135,6 +139,7 @@ add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
     target_link_libraries(recomp_xbe PUBLIC bcrypt)
     add_library(recomp_kernel STATIC
         runtime.c stop_report.c guest_heap.c xapi_clock.cpp native_fiber.c
+        fiber_model.c fiber_adapter.c
         kernel_config.c kernel_crypto.c kernel_debug.c kernel_device.c
         kernel_dispatch.c kernel_file.c kernel_interrupt.c kernel_memory.c
         kernel_ordinals.c kernel_rtl.c kernel_startup.c kernel_thread.c kernel_video.c
@@ -148,6 +153,9 @@ add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
     target_link_libraries(recomp_kernel_test PRIVATE recomp_kernel)
     add_test(NAME recomp-runtime-kernel COMMAND recomp_kernel_test)
     add_executable(recomp_kernel_scheduler_test kernel_scheduler_test.c)
+    add_executable(recomp_fiber_adapter_test fiber_adapter_test.c)
+    target_link_libraries(recomp_fiber_adapter_test PRIVATE recomp_kernel)
+    add_test(NAME recomp-runtime-fiber-adapter COMMAND recomp_fiber_adapter_test)
     target_link_libraries(recomp_kernel_scheduler_test PRIVATE recomp_kernel)
     add_test(NAME recomp-runtime-kernel-scheduler COMMAND recomp_kernel_scheduler_test)
     set_tests_properties(recomp-runtime-kernel-scheduler PROPERTIES TIMEOUT 10)
@@ -253,7 +261,7 @@ if(RECOMP_PROGRAM_DIR)
     message(STATUS "Generated ${_missing_count} fail-loud stubs for absent snapshot bodies")
     add_executable(recomp_program_runner runner.cpp program_adapters.c program_manual.c
         d3d8_adapter.c d3d8_state_adapter.c d3d_device_model.c d3d_light_model.c
-        d3d_frame_model.c d3d_tile_model.c
+        d3d_frame_model.c d3d_tile_model.c d3d_vertex_shader_model.c
         dsound_api_adapter.c dsound_device_model.c dsound_buffer_adapter.c
         dsound_buffer_model.c dsound_effects_adapter.c dsound_effects_image.c dsound_mix_model.c xbox_adpcm.c
         host_diagnostics.cpp "${_missing_source}" ${_program_sources})

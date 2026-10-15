@@ -54,6 +54,12 @@ Use `tools/run_game.py` for a bounded probe. It hardlinks the disc files,
 preserves saves and logs the runner identity. Private notes hold the observed
 frontier; a timeout by itself does not establish gameplay progress.
 
+The first boot copies about 700 MB of disc archives into the `Z:` cache
+partition, 32 KB per frame, while drawing only cleared frames. At the native
+pace this takes roughly 12 minutes and shows a black window. The cache lives in
+`private/play-disc/.recomp-storage/partition5`. A probe stopped before all
+three archives finish leaves a partial install that the next boot repeats.
+
 ## Graphics API contract
 
 `d3d8_adapter.c` owns the whole 5849 CreateDevice boundary and uses the
@@ -82,9 +88,34 @@ and additional resources/shaders/draws remain explicit limits or unbound
 APIs. The borrowed-texture capture limitation inherited from the presenter
 must be resolved before relying on queued non-linear texture uploads.
 No title/menu acceptance is established by these model contracts.
-SetVertexShader stops at the API boundary before its SDK push-buffer path
-can stall. Fixed-function vertex-format state, the remaining frame render
-states, material and texture bindings are the next graphics work.
+
+The console setters write GPU commands into a push buffer that only real
+hardware drains, so every frame-state API is replaced whole. SetVertexShader
+rebuilds the fixed-function declaration with the builder carried over from
+DOA3. It stores the declaration, handle and program-slot shadows, and applies
+the SDK's dirty bits. Creation replays the SDK's final FVF 2 declaration, so
+the first bind never reads an empty declaration. The z, stencil, fill, edge
+antialiasing, normalize, cull and multisample setters keep their game-visible
+globals. SetRenderState_Simple is a fastcall register write with
+caller-owned shadows. SetMaterial copies its 17 words into the device shadow.
+SetTexture accepts NULL bindings for stages 0 to 3. Programmable shaders,
+non-null textures, unsupported state values and runtime multisample changes
+stop explicitly. These setters record state for a future draw producer; no
+game geometry is drawn yet.
+Any SDK API that is still unreplaced reserves console push-buffer space and
+would then wait forever for GPU hardware. The reservation routine stops
+instead and reports the calling API's return address.
+
+## Game tasks
+
+Game logic runs as up to 24 XAPI fibers, resumed each frame by a task
+scheduler. `fiber_adapter.c` replaces XAPI 5849 CreateFiber, DeleteFiber,
+SwitchToFiber and ConvertThreadToFiber with native Windows fibers, ported
+from DOA3. 5849 keeps DOA3's 16-byte fiber object but moves the TLS slots:
+the current fiber is TLS block +0xC and the converted main fiber +0x10.
+Guest FS refers to the PCR block. The guest-thread scheduler saves and
+restores each thread's current fiber. Without this binding, the tasks never
+run and the game only clears frames.
 
 ## Audio API contract
 
@@ -130,6 +161,9 @@ Recording sends contain decimation, phase and scratch/DMA transfer semantics;
 ordinary SourceVoice resampling is insufficient. Those sends and 3D crosstalk
 remain guarded, as do packet streams, scheduled StopEx, additional play flags
 and unsupported DSP processing. This is an initial native FX subset.
+Listener SetPosition/SetVelocity store their vectors and dirty bits in the
+settings block. An immediate apply commits them through the existing
+listener commit. They have no native effect until 3D buffers are bound.
 Private notes hold actual graphics/audio startup and boot observations.
 
 The 5849 GetTickCount boundary reads shared monotonic time and offers bounded

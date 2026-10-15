@@ -3,6 +3,7 @@
 #include "d3d8_adapter.h"
 #include "d3d8_state_adapter.h"
 #include "dsound_api_adapter.h"
+#include "fiber_adapter.h"
 #include "kernel_abi.h"
 #include "xapi_time_adapter.h"
 #include "xbox_memory_layout.h"
@@ -43,5 +44,7 @@ RecompFunction recomp_lookup_manual(uint32_t guest_address)
     RecompFunction function = recomp_d3d8_lookup_manual(guest_address);
     if (function == NULL) function = recomp_d3d8_state_lookup_manual(guest_address);
     if (function == NULL) function = recomp_dsound_api_lookup_manual(guest_address);
+    /* XAPI fibers: native Windows fibers replace the SDK stack switch. */
+    if (function == NULL) function = recomp_fiber_lookup_manual(guest_address);
     return function;
 }

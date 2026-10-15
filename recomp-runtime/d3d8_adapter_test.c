@@ -226,6 +226,16 @@ int main(void)
         recomp_d3d8_lookup_manual(0u) == NULL &&
         recomp_d3d8_lookup_manual(0x34a471u) == NULL &&
         recomp_d3d8_lookup_manual(0x1e4930u) == NULL);
+    *recomp_memory_u32(ENTRY_ESP) = 0x00346793u;
+    recomp_runtime.registers.esp = ENTRY_ESP;
+    stop_armed = true;
+    if (setjmp(stop_environment) == 0) {
+        recomp_d3d8_lookup_manual(0x34a310u)();
+        passed &= expect("push-buffer reservation stops", false);
+    }
+    stop_armed = false;
+    passed &= expect("push-buffer stop names its caller",
+        strcmp(stop_reason, "d3d8:push-buffer-unbound:ret=00346793") == 0);
     reset_fixture();
     create_error = RECOMP_D3D_PRESENTER_OUT_OF_MEMORY;
     passed &= create();

@@ -27,8 +27,13 @@ handles framebuffer headers, viewport, tiles, clear, swap, gamma, transforms,
 point/directional lights and fog state. It reuses the sister projects'
 semantic presenter.
 
-The graphics adapter supports the verified 720x480 startup mode. Additional
-resources, shaders and draw bindings remain work, as does input.
+The graphics adapter supports the verified 720x480 startup mode and the
+fixed-function vertex format, frame render states, material and empty texture
+stages that the game sets each frame. Texture resources, programmable shaders
+and draw submission remain work, as does input.
+XAPI fibers run on native Windows fibers, so the game's scene tasks execute.
+They stop at the first D3D API that is still unbound; the window stays black
+until the draw path exists.
 The initial DirectSound 5849 adapter uses XAudio2 for PCM/Xbox ADPCM buffers,
 including data ownership, reference counts, headroom, looping and cursors.
 The effects-image adapter decodes programs, owns validated maps/state and
