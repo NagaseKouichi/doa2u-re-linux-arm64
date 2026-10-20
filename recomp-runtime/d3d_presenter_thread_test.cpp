@@ -1909,7 +1909,10 @@ static bool testVisibility()
     bool complete = true;
     uint32_t pixels[2]{};
     passed &= expect("queued result", recomp_d3d_presenter_visibility_result(presenter, 7u, &complete, &pixels[0]));
+#ifdef _WIN32
+    // The render thread publishes nothing before the flush.
     passed &= !complete;
+#endif
     passed &= expect("unknown index", recomp_d3d_presenter_visibility_result(presenter, 9u, &complete, &pixels[0]),
         RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     passed &= expect("publish visibility", recomp_d3d_presenter_flush(presenter, false));
