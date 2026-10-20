@@ -24,6 +24,8 @@ Build (once, about 45 minutes; most of it is disassembly):
 2. Drag your Disc 2 ISO onto BuildGame.cmd. The ISO is only read.
 3. Wait for "Build complete". The build is checked against the exact
    program the developers tested; any difference stops the build.
+   A progress bar and clock show it is still working; keep the window
+   open even when the bar moves slowly.
 
 Play: double-click play.cmd, pick resolution, MSAA, SMAA, widescreen and
 whether to skip the intro movies, and press Play; it remembers your

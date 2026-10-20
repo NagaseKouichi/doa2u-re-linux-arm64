@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import uuid
 
 from extract_iso import extract, run_logged, sha256
@@ -20,6 +22,73 @@ PILLOW = "12.2.0"  # run_game.py builds the dedication card with it
 # pin or tools/doa2u/seed_functions.json changes it; regenerate and update both.
 PROGRAM_SHA256 = "5f43bf496a7b2e22c66598ed75eda161220eb420b55e833e5f3e70ce84ad1760"
 PROGRAM_EBP = 0
+# Seconds and output lines each step took in the validated build; they pace the progress bar.
+STEPS = {"xbe-parser": (5, 253), "disasm": (1440, 33), "lift": (430, 54),
+         "configure": (40, 20), "build": (320, 115)}
+LABELS = {"xbe-parser": "Reading the executable", "disasm": "Disassembling",
+          "lift": "Translating to C", "configure": "Configuring", "build": "Compiling"}
+
+
+def build_fraction(plan, finished, lines, elapsed):
+    """Share of the planned steps done: finished ones plus the current one's output or time."""
+    total = sum(STEPS[step][0] for step in plan)
+    done = sum(STEPS[step][0] for step in plan[:finished])
+    if finished < len(plan):
+        seconds, expected = STEPS[plan[finished]]
+        # Time alone stops short of the step's end, so a slower PC waits on real output.
+        done += seconds * min(max(lines / expected, min(elapsed / seconds, 0.95)), 0.99)
+    return done / total
+
+
+class Progress:
+    """One console bar across the build steps; each step's output still goes to its log."""
+
+    def __init__(self, plan):
+        self.plan, self.finished, self.lines = plan, 0, 0
+        self.start = self.step_start = time.monotonic()
+
+    def draw(self):
+        now = time.monotonic()
+        share = build_fraction(self.plan, self.finished, self.lines, now - self.step_start)
+        label = LABELS[self.plan[min(self.finished, len(self.plan) - 1)]]
+        minutes, seconds = divmod(int(now - self.start), 60)
+        print(f"\r[{'#' * int(share * 30):<30}] {share:4.0%}  {label:<22} {minutes:02d}:{seconds:02d} elapsed",
+              end="", flush=True)
+
+    def count_line(self):
+        self.lines += 1
+
+    def tick(self, stop):
+        while not stop.wait(1):
+            self.draw()
+
+    def run(self, args, log_path, cwd=None):
+        if sys.stdout.isatty():
+            self.run_with_bar(args, log_path, cwd)
+        else:
+            run_logged(args, log_path, cwd)
+            self.finished += 1
+
+    def run_with_bar(self, args, log_path, cwd):
+        stop = threading.Event()
+        ticker = threading.Thread(target=self.tick, args=(stop,), daemon=True)
+        self.draw()
+        ticker.start()
+        try:
+            run_logged(args, log_path, cwd, on_line=self.count_line)
+        except subprocess.CalledProcessError:
+            stop.set()
+            ticker.join()
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+            print(f"\n{LABELS[self.plan[self.finished]]} failed. The end of {log_path}:", *tail, sep="\n")
+            raise
+        finally:
+            stop.set()
+            ticker.join()
+        self.finished, self.lines, self.step_start = self.finished + 1, 0, time.monotonic()
+        self.draw()
+        if self.finished == len(self.plan):
+            print()
 
 
 def selected_xbe():
@@ -113,6 +182,8 @@ def build(build_only=False, lift_only=False, iso=None):
     logs.mkdir(parents=True)
     generated, disasm = work / "generated", work / "disasm"
     receipt_path = work / "receipt.json"
+    lift = [] if build_only else ["xbe-parser", "disasm", "lift"]
+    progress = Progress(lift + ([] if lift_only else ["configure", "build"]))
     if build_only:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if receipt["recipe"] != recipe:
@@ -121,12 +192,12 @@ def build(build_only=False, lift_only=False, iso=None):
             raise ValueError("Generated program differs from its authenticated receipt")
     else:
         analysis = work / "analysis.json"
-        run_logged([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
-                   logs / "xbe-parser.log", LIFTER)
-        run_logged([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
-                    "--analysis-json", analysis, "--seed-functions", seeds],
-                   logs / "disasm.log", LIFTER)
-        run_logged([sys.executable, "-u", "-m", "tools.recomp", xbe, "--all", "--split", "1000",
+        progress.run([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
+                     logs / "xbe-parser.log", LIFTER)
+        progress.run([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
+                      "--analysis-json", analysis, "--seed-functions", seeds],
+                     logs / "disasm.log", LIFTER)
+        progress.run([sys.executable, "-u", "-m", "tools.recomp", xbe, "--all", "--split", "1000",
                     "--game-name", "Dead or Alive 2 Ultimate", "--disasm-dir", disasm,
                     "--func-id-dir", work / "none", "--abi-dir", work / "none",
                     "--icall-sites", work / "none.json", "--gen-dir", generated,
@@ -139,12 +210,12 @@ def build(build_only=False, lift_only=False, iso=None):
     if lift_only:
         return
     build_dir = ROOT / "build/recomp-program"
-    run_logged(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, "-A", "x64",
+    progress.run(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, "-A", "x64",
                 f"-DRECOMP_PROGRAM_DIR={generated.as_posix()}",
                 f"-DRECOMP_XBE_SHA256={recipe['xbe_sha256']}",
                 f"-DRECOMP_PROGRAM_MANIFEST_SHA256={receipt['manifest_sha256']}",
                 f"-DRECOMP_PROGRAM_EBP_EXPECTED={receipt['ebp_count']}"], logs / "configure.log")
-    run_logged(["cmake", "--build", build_dir, "--config", "Release", "--parallel", "4",
+    progress.run(["cmake", "--build", build_dir, "--config", "Release", "--parallel", "4",
                 "--target", "recomp_program_runner"], logs / "build.log")
     receipt["runner_sha256"] = sha256(build_dir / "Release/recomp_program_runner.exe")
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")

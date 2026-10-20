@@ -6,11 +6,23 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build_game import import_disc, lifter_revision, program_manifest, selected_xbe
+from build_game import STEPS, build_fraction, import_disc, lifter_revision, program_manifest, selected_xbe
 from extract_iso import sha256
 
 
 class BuildTests(unittest.TestCase):
+    def test_progress_counts_finished_steps_then_output_or_time(self):
+        plan = list(STEPS)
+        total = sum(seconds for seconds, _ in STEPS.values())
+        self.assertEqual(build_fraction(plan, 0, 0, 0), 0)
+        # Half the lift's output after the parser and disassembly.
+        self.assertAlmostEqual(build_fraction(plan, 2, 27, 0), (5 + 1440 + 215) / total)
+        # A silent, slow disassembly moves by time but stops short of its end.
+        self.assertAlmostEqual(build_fraction(plan, 1, 0, 10**6), (5 + 1440 * 0.95) / total)
+        self.assertAlmostEqual(build_fraction(plan, 1, 500, 0), (5 + 1440 * 0.99) / total)
+        self.assertEqual(build_fraction(plan, len(plan), 0, 0), 1)
+        self.assertEqual(build_fraction(["configure", "build"], 1, 0, 0), 40 / 360)
+
     def test_manifest_authenticates_members_and_contents(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
