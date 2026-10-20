@@ -25,8 +25,9 @@ PROGRAM_EBP = 0
 # The disassembler's function list, minus call edges the lift does not need, so players skip disassembly.
 FUNCTIONS = ROOT / "tools/doa2u/functions"
 # Seconds and output lines each step took in the validated build; they pace the progress bar.
-STEPS = {"xbe-parser": (5, 253), "disasm": (1440, 33), "lift": (430, 54),
-         "configure": (40, 20), "build": (320, 115)}
+# The compiler lists every file up front under /MP, so the compile advances by time alone.
+STEPS = {"xbe-parser": (5, 253), "disasm": (1440, 33), "lift": (315, 55),
+         "configure": (30, 20), "build": (245, 0)}
 LABELS = {"xbe-parser": "Reading the executable", "disasm": "Disassembling",
           "lift": "Translating to C", "configure": "Configuring", "build": "Compiling"}
 
@@ -38,7 +39,8 @@ def build_fraction(plan, finished, lines, elapsed):
     if finished < len(plan):
         seconds, expected = STEPS[plan[finished]]
         # Time alone stops short of the step's end, so a slower PC waits on real output.
-        done += seconds * min(max(lines / expected, min(elapsed / seconds, 0.95)), 0.99)
+        share = min(elapsed / seconds, 0.95)
+        done += seconds * min(max(lines / expected, share) if expected else share, 0.99)
     return done / total
 
 
