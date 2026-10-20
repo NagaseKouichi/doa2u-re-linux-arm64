@@ -19,9 +19,11 @@ XBE_SHA256 = "30d5bd3ff363afb72ea4d5058537013e284df0930f1921d345aeaf44af288a0c"
 CAPSTONE = "5.0.7"
 PILLOW = "12.2.0"  # run_game.py builds the dedication card with it
 # The generated program the runtime was validated against. Changing the lifter
-# pin or tools/doa2u/seed_functions.json changes it; regenerate and update both.
+# pin or the function list in tools/doa2u/functions changes it; regenerate and update both.
 PROGRAM_SHA256 = "5f43bf496a7b2e22c66598ed75eda161220eb420b55e833e5f3e70ce84ad1760"
 PROGRAM_EBP = 0
+# The disassembler's function list, minus call edges the lift does not need, so players skip disassembly.
+FUNCTIONS = ROOT / "tools/doa2u/functions"
 # Seconds and output lines each step took in the validated build; they pace the progress bar.
 STEPS = {"xbe-parser": (5, 253), "disasm": (1440, 33), "lift": (430, 54),
          "configure": (40, 20), "build": (320, 115)}
@@ -123,6 +125,25 @@ def lifter_revision():
     return revision
 
 
+def merge_functions(path):
+    """Join the committed function shards into the lifter's functions.json."""
+    functions = [entry for shard in sorted(FUNCTIONS.glob("*.json"))
+                 for entry in json.loads(shard.read_text(encoding="utf-8"))]
+    path.write_text(json.dumps(functions), encoding="utf-8")
+
+
+def write_functions(disasm):
+    """Replace the committed shards with a fresh disassembly, under the public file-size limit."""
+    functions = json.loads((disasm / "functions.json").read_text(encoding="utf-8"))
+    for old in FUNCTIONS.glob("*.json"):
+        old.unlink()
+    for index in range(0, len(functions), 1000):
+        rows = [json.dumps({k: v for k, v in entry.items() if k not in ("calls_to", "called_by")})
+                for entry in functions[index:index + 1000]]
+        (FUNCTIONS / f"{index // 1000:02d}.json").write_text(
+            "[\n" + ",\n".join(rows) + "\n]\n", encoding="utf-8", newline="\n")
+
+
 def import_disc(iso):
     """Extract a user's ISO once into private/imported-disc and select its game executable."""
     if not iso.is_file():
@@ -150,7 +171,7 @@ def import_disc(iso):
     raise ValueError("This build supports only Dead or Alive Ultimate (Xbox, USA) Disc 2")
 
 
-def build(build_only=False, lift_only=False, iso=None):
+def build(build_only=False, lift_only=False, iso=None, disassemble=False):
     if iso is not None:
         import_disc(iso)
         if shutil.which("cmake") is None:
@@ -173,17 +194,26 @@ def build(build_only=False, lift_only=False, iso=None):
     import capstone
     xbe = selected_xbe()
     revision = lifter_revision()
-    seeds = ROOT / "tools/doa2u/seed_functions.json"
-    recipe = dict(xbe_sha256=sha256(xbe), lifter_commit=revision, capstone=capstone.__version__,
-                  seed_functions_sha256=sha256(seeds))
     work = ROOT / "private/program"
     work.mkdir(parents=True, exist_ok=True)
     logs = ROOT / "private/build-logs" / uuid.uuid4().hex[:8]
     logs.mkdir(parents=True)
-    generated, disasm = work / "generated", work / "disasm"
+    generated, disasm, functions = work / "generated", work / "disasm", work / "functions.json"
     receipt_path = work / "receipt.json"
-    lift = [] if build_only else ["xbe-parser", "disasm", "lift"]
+    lift = [] if build_only else ["xbe-parser", "disasm", "lift"] if disassemble else ["lift"]
     progress = Progress(lift + ([] if lift_only else ["configure", "build"]))
+    if disassemble:
+        analysis = work / "analysis.json"
+        progress.run([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
+                     logs / "xbe-parser.log", LIFTER)
+        progress.run([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
+                      "--analysis-json", analysis,
+                      "--seed-functions", ROOT / "tools/doa2u/seed_functions.json"],
+                     logs / "disasm.log", LIFTER)
+        write_functions(disasm)
+    merge_functions(functions)
+    recipe = dict(xbe_sha256=sha256(xbe), lifter_commit=revision, capstone=capstone.__version__,
+                  functions_sha256=sha256(functions))
     if build_only:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if receipt["recipe"] != recipe:
@@ -191,14 +221,9 @@ def build(build_only=False, lift_only=False, iso=None):
         if program_manifest(generated) != (receipt["manifest_sha256"], receipt["ebp_count"]):
             raise ValueError("Generated program differs from its authenticated receipt")
     else:
-        analysis = work / "analysis.json"
-        progress.run([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
-                     logs / "xbe-parser.log", LIFTER)
-        progress.run([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
-                      "--analysis-json", analysis, "--seed-functions", seeds],
-                     logs / "disasm.log", LIFTER)
         progress.run([sys.executable, "-u", "-m", "tools.recomp", xbe, "--all", "--split", "1000",
-                    "--game-name", "Dead or Alive 2 Ultimate", "--disasm-dir", disasm,
+                    "--game-name", "Dead or Alive 2 Ultimate", "--disasm-dir", work / "none",
+                    "--functions", functions,
                     "--func-id-dir", work / "none", "--abi-dir", work / "none",
                     "--icall-sites", work / "none.json", "--gen-dir", generated,
                     "--output-dir", work / "metadata"], logs / "lift.log", LIFTER)
@@ -228,9 +253,11 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--build-only", action="store_true", help="Rebuild authenticated generated sources")
     modes.add_argument("--lift-only", action="store_true", help="Generate without building the runner")
+    modes.add_argument("--disassemble", action="store_true",
+                       help="Rewrite tools/doa2u/functions from a fresh disassembly, then build")
     args = parser.parse_args()
     try:
-        build(args.build_only, args.lift_only, args.iso)
+        build(args.build_only, args.lift_only, args.iso, args.disassemble)
     except (OSError, ValueError, KeyError, ImportError, subprocess.CalledProcessError) as error:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1
