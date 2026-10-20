@@ -40,7 +40,8 @@ std::string recomp_shader_emulate_sampler_bias(const std::string &hlsl);
 /* Vertex shaders see RECOMP_UNIFORM_SET as 1 and fragment shaders as 3, so
    [[vk::binding(n, RECOMP_UNIFORM_SET)]] places a constant buffer in either. */
 
-/* defines are NAME or NAME=VALUE preprocessor definitions. Thread-safe. */
+/* defines are NAME or NAME=VALUE preprocessor definitions. Thread-safe.
+   With RECOMP_SHADER_CACHE set to a folder, results are kept there. */
 bool recomp_shader_compile(const std::string &hlsl, const char *entry_point, bool vertex,
     RecompShaderTarget target, const std::vector<std::string> &defines,
     RecompCompiledShader &out, std::string &error);

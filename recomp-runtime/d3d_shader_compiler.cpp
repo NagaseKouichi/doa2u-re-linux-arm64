@@ -3,7 +3,10 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <type_traits>
 
@@ -368,7 +371,74 @@ bool recomp_shader_compiler_available()
     return loadShaderc();
 }
 
+static bool compileUncached(const std::string &hlsl, const char *entry_point, bool vertex,
+    RecompShaderTarget target, const std::vector<std::string> &defines,
+    RecompCompiledShader &out, std::string &error);
+
+namespace {
+
+/* RECOMP_SHADER_CACHE names a folder for compiled shaders, so a later launch
+   skips shaderc and SPIRV-Cross. Entries are keyed by everything that goes
+   into a compile; a missing or unreadable entry is simply compiled again. */
+std::string cachePath(const std::string &hlsl, const char *entry_point, bool vertex,
+    RecompShaderTarget target, const std::vector<std::string> &defines)
+{
+    const char *folder = std::getenv("RECOMP_SHADER_CACHE");
+    if (folder == nullptr || folder[0] == '\0') return {};
+    uint64_t hash = 0xcbf29ce484222325ull;
+    const auto mix = [&hash](const std::string &text) {
+        for (const unsigned char c : text) hash = (hash ^ c) * 0x100000001b3ull;
+        hash = (hash ^ 0xffu) * 0x100000001b3ull;
+    };
+    mix("doa2u-shader-cache-1");
+    mix(hlsl);
+    mix(entry_point);
+    mix(vertex ? "vertex" : "fragment");
+    for (const std::string &define : defines) mix(define);
+    char name[48];
+    std::snprintf(name, sizeof name, "/%016llx.%s", static_cast<unsigned long long>(hash),
+        target == RecompShaderTarget::Msl ? "msl" : "spv");
+    return std::string(folder) + name;
+}
+
+/* An entry is the entry point name, a newline, then the code. */
+bool readCache(const std::string &path, RecompCompiledShader &out)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file || !std::getline(file, out.entry_point) || out.entry_point.empty()) return false;
+    out.code.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return !out.code.empty();
+}
+
+void writeCache(const std::string &path, const RecompCompiledShader &shader)
+{
+    // Written beside the entry and renamed, so a reader never sees half of one.
+    const std::string partial = path + ".tmp" + std::to_string(reinterpret_cast<uintptr_t>(&shader));
+    {
+        std::ofstream file(partial, std::ios::binary | std::ios::trunc);
+        if (!file) return;
+        file << shader.entry_point << '\n';
+        file.write(reinterpret_cast<const char *>(shader.code.data()),
+            static_cast<std::streamsize>(shader.code.size()));
+        if (!file) return;
+    }
+    std::rename(partial.c_str(), path.c_str());
+}
+
+} // namespace
+
 bool recomp_shader_compile(const std::string &hlsl, const char *entry_point, bool vertex,
+    RecompShaderTarget target, const std::vector<std::string> &defines,
+    RecompCompiledShader &out, std::string &error)
+{
+    const std::string cached = cachePath(hlsl, entry_point, vertex, target, defines);
+    if (!cached.empty() && readCache(cached, out)) return true;
+    if (!compileUncached(hlsl, entry_point, vertex, target, defines, out, error)) return false;
+    if (!cached.empty()) writeCache(cached, out);
+    return true;
+}
+
+static bool compileUncached(const std::string &hlsl, const char *entry_point, bool vertex,
     RecompShaderTarget target, const std::vector<std::string> &defines,
     RecompCompiledShader &out, std::string &error)
 {

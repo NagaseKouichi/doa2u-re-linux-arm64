@@ -96,6 +96,10 @@ def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), a
             env[name] = str(int(value))
     if resolution is not None:
         env["RECOMP_D3D_SCALE"] = str(resolution / 480)
+    # The SDL_GPU presenter keeps compiled shaders here; Direct3D 11 ignores it.
+    shader_cache = ROOT / "private/shader-cache"
+    shader_cache.mkdir(parents=True, exist_ok=True)
+    env.setdefault("RECOMP_SHADER_CACHE", str(shader_cache))
     if len(start_polls) > 4 or any(poll <= 0 or poll > 2**64 - 1 for poll in start_polls):
         raise ValueError("Start polls must be positive uint64 values, at most four")
     if len(a_polls) > 192 or any(poll <= 0 or poll > 2**64 - 1 for poll in a_polls):
