@@ -2,8 +2,10 @@
 #include "input_pulse_source.h"
 #include "input_keyboard_win32.h"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
 #include <SDL3/SDL.h>
 
 #include <string.h>
@@ -26,10 +28,43 @@ enum {
 static SDL_Gamepad *pads[RECOMP_INPUT_PORT_COUNT];
 static uint8_t keyboard[RECOMP_INPUT_KEY_COUNT];
 
+#ifdef _WIN32
 static bool pressed(int key)
 {
     return keyboard[key] || (GetAsyncKeyState(key) & 0x8000) != 0;
 }
+
+static bool focused(void)
+{
+    DWORD foreground_process = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foreground_process);
+    return foreground_process == GetCurrentProcessId();
+}
+
+static unsigned long long tick_ms(void)
+{
+    return GetTickCount64();
+}
+#else
+/* Virtual-key codes the keyboard model is indexed by; the SDL_GPU presenter
+   forwards SDL key events under these codes. */
+enum { VK_BACK = 0x08, VK_RETURN = 0x0d, VK_LEFT = 0x25, VK_UP = 0x26, VK_RIGHT = 0x27, VK_DOWN = 0x28 };
+
+static bool pressed(int key)
+{
+    return keyboard[key] != 0u;
+}
+
+static bool focused(void)
+{
+    return SDL_GetKeyboardFocus() != NULL;
+}
+
+static unsigned long long tick_ms(void)
+{
+    return SDL_GetTicks();
+}
+#endif
 
 static bool trace_enabled(void)
 {
@@ -113,31 +148,31 @@ void recomp_input_host_stop_vibration(void)
 }
 
 static void trace_sample(
-    const RecompInputGamepad *pad, SDL_Gamepad *host, DWORD foreground_process)
+    const RecompInputGamepad *pad, SDL_Gamepad *host, bool is_focused)
 {
     static bool seen;
     static unsigned lines;
     static RecompInputGamepad previous;
     static SDL_JoystickID previous_id;
-    static DWORD previous_foreground;
+    static bool previous_focused;
     if (!trace_enabled() || lines >= 4096u) return;
     SDL_JoystickID id = host != NULL ? SDL_GetGamepadID(host) : 0;
     if (seen && memcmp(&previous, pad, sizeof previous) == 0 &&
-        previous_id == id && previous_foreground == foreground_process) return;
+        previous_id == id && previous_focused == is_focused) return;
     const char *host_name = host != NULL ? SDL_GetGamepadName(host) : NULL;
     fprintf(stderr,
         "[DEBUG-r501-input] tick_ms=%llu pad='%s' focused=%u"
         " digital=%04x analog=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x"
         " axes=%d,%d,%d,%d\n",
-        (unsigned long long)GetTickCount64(), host_name != NULL ? host_name : "none",
-        foreground_process == GetCurrentProcessId(),
+        tick_ms(), host_name != NULL ? host_name : "none",
+        is_focused ? 1u : 0u,
         (unsigned)pad->buttons, pad->analog_buttons[0], pad->analog_buttons[1],
         pad->analog_buttons[2], pad->analog_buttons[3], pad->analog_buttons[4],
         pad->analog_buttons[5], pad->analog_buttons[6], pad->analog_buttons[7],
         pad->thumb_lx, pad->thumb_ly, pad->thumb_rx, pad->thumb_ry);
     previous = *pad;
     previous_id = id;
-    previous_foreground = foreground_process;
+    previous_focused = is_focused;
     seen = true;
     ++lines;
 }
@@ -207,11 +242,9 @@ bool recomp_input_host_sample(uint32_t port, RecompInputGamepad *gamepad)
         /* The keyboard drives port 0 only. */
         return host != NULL;
     }
-    DWORD foreground_process = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &foreground_process);
-    if (foreground_process != GetCurrentProcessId()) {
+    if (!focused()) {
         recomp_input_keyboard_reset();
-        trace_sample(gamepad, host, foreground_process);
+        trace_sample(gamepad, host, false);
         return true;
     }
 
@@ -231,6 +264,6 @@ bool recomp_input_host_sample(uint32_t port, RecompInputGamepad *gamepad)
     if (pressed('W')) gamepad->analog_buttons[RECOMP_INPUT_ANALOG_BLACK] = 0xffu;
     if (pressed('E')) gamepad->analog_buttons[RECOMP_INPUT_ANALOG_LTRIG] = 0xffu;
     if (pressed('R')) gamepad->analog_buttons[RECOMP_INPUT_ANALOG_RTRIG] = 0xffu;
-    trace_sample(gamepad, host, foreground_process);
+    trace_sample(gamepad, host, true);
     return true;
 }

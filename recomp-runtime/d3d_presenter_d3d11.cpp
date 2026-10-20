@@ -1,7 +1,7 @@
-#include "d3d_presenter_d3d11_backend.h"
+#include "d3d_presenter_backend.h"
 #include "d3d_draw_model.h"
+#include "d3d_draw_shader.h"
 #include "d3d_vblank.h"
-#include "d3d_vertex_program.h"
 #include "input_keyboard_win32.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -71,350 +71,6 @@ bool sampleFrameRate(FrameRateCounter &counter, ULONGLONG now, double &fps, doub
 }
 
 
-/* Untransformed positions with a host-side world-view-projection composite.
-
-   Vertex components other than position vary by FVF: this title draws both
-   XYZ|NORMAL|TEX1 and XYZ|DIFFUSE|TEX1, whose texcoords sit at different
-   offsets and whose colors come from different sources. One shader cannot
-   serve both, so the shader is assembled per FVF from the decoded layout and
-   cached with its matching input layout.
-
-   Vertex color comes from the stream or the admitted fixed-function lighting
-   path. Unsupported lighting configurations retain the earlier texture/normal
-   fallback. Texture alpha remains independent of lit diffuse RGB. */
-constexpr char kDrawShaderPrologue[] =
-    "cbuffer Transform : register(b0) {\n"
-    "    row_major float4x4 wvp[4];\n"
-    "    float4 draw_flags;\n"
-    "    float4 blend_flags;\n"
-    "    float4 texture_factor;\n"
-    "    float4 lighting_flags;\n"
-    "    float4 texture_flags;\n"
-    "    row_major float4x4 reflection_world_view;\n"
-    "    row_major float4x4 reflection_normal;\n"
-    "    row_major float4x4 reflection_transform;\n"
-    "    float4 reflection_diffuse;\n"
-    "    float4 reflection_flags;\n"
-    "    float4 vc[192];\n"
-    "    row_major float4x4 directional_normals[4];\n"
-    "    float4 directional_base;\n"
-    "    float4 directional_material;\n"
-    "    float4 directional_directions[8];\n"
-    "    float4 directional_colors[8];\n"
-    "    float4 directional_flags;\n"
-    "    row_major float4x4 light_world[4];\n"
-    "    float4 light_positions[8];\n"
-    "    float4 light_attenuation[8];\n"
-    "    float4 light_ambient[8];\n"
-    "    float4 light_specular[8];\n"
-    "    float4 light_view;\n"
-    "    float4 light_stage;\n"
-    "    float4 filter_flags;\n"
-    "    float4 filter_texel;\n"
-    "    float4 filter_constants[4];\n"
-    "    row_major float4x4 reflection_transform1;\n"
-    "    float4 bump_matrix[2];\n"
-    "    float4 bump_fog;\n"
-    "    float4 fog_color;\n"
-    "    row_major float4x4 reflection_blend_world_view[3];\n"
-    "    row_major float4x4 reflection_blend_normal[3];\n"
-    "    row_major float4x4 reflection_transform2;\n"
-    "    float4 reflection_stage2_flags;\n"
-    "    float4 raster_bias;\n"
-    "}\n"
-    "Texture2D guest_texture : register(t0);\n"
-    "Texture3D guest_volume : register(t3);\n"
-    "SamplerState guest_sampler : register(s0);\n"
-    "Texture2D alpha_mask : register(t1);\n"
-    "SamplerState mask_sampler : register(s1);\n"
-    "Texture2D bump_map : register(t2);\n"
-    "SamplerState bump_sampler : register(s2);\n";
-
-/* Builds the draw shader for one decoded vertex layout. Only the components
-   the layout actually carries appear in VSIn, so the input layout and the
-   shader signature always agree. */
-int buildDrawShaderSource(
-    const RecompD3dVertexLayout &layout,
-    char *out,
-    size_t out_size, bool coverage_only)
-{
-    const bool has_normal =
-        layout.normal_offset != RECOMP_D3D_FVF_ABSENT;
-    const bool has_diffuse =
-        layout.diffuse_offset != RECOMP_D3D_FVF_ABSENT;
-    const bool has_texcoord =
-        layout.texcoord_offset != RECOMP_D3D_FVF_ABSENT;
-    const bool four_coords = layout.texcoord_count == 4u;
-    const char *extra_coords = four_coords
-        ? "    float2 texcoord1 : TEXCOORD1;\n"
-          "    float2 texcoord2 : TEXCOORD2;\n"
-          "    float2 texcoord3 : TEXCOORD3;\n"
-        : layout.texcoord_count == 2u ? "    float2 texcoord1 : TEXCOORD1;\n" : "";
-
-    char position[768];
-    if (layout.pretransformed) {
-        std::snprintf(position, sizeof position,
-            "    output.position = mul(float4(input.position.xyz, 1.0f), wvp[0]) / input.position.w;\n");
-    } else if (layout.blend_weight_count != 0u) {
-        std::snprintf(position, sizeof position,
-            "    if (blend_flags.x > 0.5f) {\n"
-            "    output.position = float4(0, 0, 0, 0);\n"
-            "    float remainder = 1.0f;\n"
-            "    [unroll] for (uint i = 0; i < %u; ++i) {\n"
-            "        output.position += input.weights[i] * mul(float4(input.position, 1), wvp[i]);\n"
-            "        remainder -= input.weights[i];\n"
-            "    }\n"
-            "    output.position += remainder * mul(float4(input.position, 1), wvp[%u]);\n"
-            "    } else { output.position = mul(float4(input.position, 1), wvp[0]); }\n",
-            layout.blend_weight_count, layout.blend_weight_count);
-    } else {
-        std::snprintf(position, sizeof position,
-            "    output.position = mul(float4(input.position, 1.0f), wvp[0]);\n");
-    }
-    if (coverage_only) {
-        return std::snprintf(out, out_size,
-            "%sstruct VSIn { float3 position : POSITION; %s };\n"
-            "struct VSOut { float4 position : SV_POSITION; };\n"
-            "VSOut vs_main(VSIn input) { VSOut output;\n%s return output; }\n"
-            "float4 ps_main(VSOut input) : SV_TARGET { return 0; }\n",
-            kDrawShaderPrologue,
-            layout.blend_weight_count ? "float3 weights : BLENDWEIGHT;" : "", position);
-    }
-    return std::snprintf(
-        out,
-        out_size,
-        "%s"
-        "struct VSIn {\n"
-        "    %s position : POSITION;\n"
-        "%s%s%s%s%s"
-        "};\n"
-        "struct VSOut {\n"
-        "    float4 position : SV_POSITION;\n"
-        "    float4 color : COLOR0;\n"
-        "    float2 texcoord : TEXCOORD0;\n"
-        "    float volume_coord : TEXCOORD11;\n"
-        "    float2 reflection_coord : TEXCOORD4;\n"
-        "    float3 lit_specular : TEXCOORD6;\n"
-        "    float projected_q : TEXCOORD7;\n"
-        "    float2 reflection_coord2 : TEXCOORD10;\n"
-        "%s"
-        "};\n"
-        "VSOut vs_main(VSIn input) {\n"
-        "    VSOut output = (VSOut)0;\n"
-        "%s"
-        "%s"
-        "%s"
-        "%s"
-        "    output.reflection_coord = float2(0, 0);\n"
-        "%s"
-        "%s"
-        "    return output;\n"
-        "}\n"
-        "float4 ps_main(VSOut input) : SV_TARGET {\n"
-        /* Projective texgen divides after interpolation, as NV2A does. */
-        "    if (filter_texel.z > 2.5f) input.texcoord /= input.projected_q;\n"
-        "    float4 shaded = input.color;\n"
-        "    if (reflection_flags.x > 0.5f) {\n"
-        "        float4 diffuse = %s;\n"
-        "        if (directional_flags.x > 0.5f) diffuse.rgb = input.color.rgb;\n"
-        "        float4 base = guest_texture.Sample(guest_sampler, input.texcoord);\n"
-        "        if (filter_flags.w > 0.5f && base.a == 0.0f) discard;\n"
-        "        base.a *= diffuse.a;\n"
-        "        float4 env = alpha_mask.Sample(mask_sampler, input.reflection_coord);\n"
-        "        if (reflection_stage2_flags.y > 0.5f && env.a == 0.0f) discard;\n"
-        /* w: bit 0 premultiplied blend, bit 1 stage-2 pass-through (no diffuse). */
-        "        shaded = (fmod(reflection_flags.w, 2.0f) > 0.5f\n"
-        "            ? saturate(env + base * (1.0f - env.a)) : lerp(base, env, env.a));\n"
-        "        if (reflection_stage2_flags.x > 0.5f) {\n"
-        "            float4 third = bump_map.Sample(bump_sampler, input.reflection_coord2);\n"
-        "            shaded = lerp(shaded, third, third.a);\n"
-        "        }\n"
-        "        shaded *= reflection_flags.w > 1.5f ? 1.0f : diffuse;\n"
-        "    } else\n"
-        "%s"
-        "    if (blend_flags.y == 1.0f) {\n"
-        "        shaded = texture_factor;\n"
-        "    } else if (draw_flags.x > 0.5f) {\n"
-        "        float4 sampled = reflection_stage2_flags.z > 0.5f\n"
-        "            ? guest_volume.Sample(guest_sampler, float3(input.texcoord, input.volume_coord))\n"
-        "            : guest_texture.Sample(guest_sampler, input.texcoord * texture_flags.xy);\n"
-        "        if (filter_flags.w > 0.5f && sampled.a == 0.0f) discard;\n"
-        "        if (lighting_flags.y > 0.5f) sampled.rgb = 1.0f;\n"
-        "        shaded %s sampled;\n"
-        "        if (directional_flags.w > 0.5f) {\n"
-        "            shaded.rgb = (light_stage.x > 0.5f ? sampled.rgb : 1.0f) *\n"
-        "                (light_stage.y > 1.5f ? texture_factor.rgb : light_stage.y > 0.5f ? input.color.rgb : 1.0f);\n"
-        "            shaded.a = (light_stage.z > 0.5f ? sampled.a : 1.0f) *\n"
-        "                (light_stage.w > 1.5f ? texture_factor.a : light_stage.w > 0.5f ? input.color.a : 1.0f);\n"
-        "        } else if (directional_flags.x > 0.5f) shaded.rgb *= input.color.rgb;\n"
-        "        if (lighting_flags.x > 0.5f) shaded.rgb = 0.0f;\n"
-        "        shaded.a = blend_flags.w > 2.5f ? input.color.a\n"
-            "            : blend_flags.w > 1.5f ? sampled.a\n"
-            "            : blend_flags.w > 0.5f ? blend_flags.z : shaded.a * blend_flags.z;\n"
-        "        if (blend_flags.y > 5.5f) shaded.rgb = saturate(4.0f * shaded.rgb * texture_factor.rgb);\n"
-        "        else if (blend_flags.y > 4.5f) shaded.rgb *= texture_factor.rgb;\n"
-        "        else if (blend_flags.y > 3.5f) shaded.a *= texture_factor.a;\n"
-        "        else if (blend_flags.y > 2.5f) shaded.rgb = saturate(2.0f * shaded.rgb * texture_factor.rgb);\n"
-        "        else if (blend_flags.y > 1.5f) shaded *= texture_factor;\n"
-        "    }\n"
-        /* Fixed function adds specular after the texture stages, textured or not. */
-        "    if (directional_flags.w > 0.5f) shaded.rgb += input.lit_specular;\n"
-        /* A stage-1 mask; z > 1.5 adds its ALPHAKILL, and z > 2.5 only kills. */
-        "    if (reflection_flags.z > 0.5f) {\n"
-        "        float mask = alpha_mask.SampleBias(mask_sampler, input.reflection_coord, reflection_flags.w).a;\n"
-        "        if (reflection_flags.z > 1.5f && mask == 0.0f) discard;\n"
-        "        if (reflection_flags.z < 2.5f) shaded.a *= mask;\n"
-        "    }\n"
-        /* NV2A compares rounded 8-bit alpha. Function values follow
-           RecompD3dCompareFunc, from NEVER (0) to ALWAYS (7). */
-        "    if (draw_flags.y > 0.5f) {\n"
-        "        float alpha = round(saturate(shaded.a) * 255.0f);\n"
-        "        float ref = draw_flags.w;\n"
-        "        int func = (int)draw_flags.z;\n"
-        "        bool alpha_pass = func == 7 ||\n"
-        "            (func == 1 && alpha < ref) ||\n"
-        "            (func == 2 && alpha == ref) ||\n"
-        "            (func == 3 && alpha <= ref) ||\n"
-        "            (func == 4 && alpha > ref) ||\n"
-        "            (func == 5 && alpha != ref) ||\n"
-        "            (func == 6 && alpha >= ref);\n"
-        "        if (!alpha_pass) discard;\n"
-        "    }\n"
-        "    return shaded;\n"
-        "}\n",
-        kDrawShaderPrologue,
-        layout.pretransformed ? "float4" : "float3",
-        layout.blend_weight_count ? "    float3 weights : BLENDWEIGHT;\n" : "",
-        has_normal ? "    float3 normal : NORMAL;\n" : "",
-        has_diffuse ? "    float4 diffuse : COLOR0;\n" : "",
-        has_texcoord ? "    float2 texcoord : TEXCOORD0;\n" : "",
-        extra_coords,
-        extra_coords,
-        position,
-        /* Guest vertex color when the stream has one; otherwise the normal
-           stands in so surfaces remain distinguishable. */
-        has_diffuse
-            ? "    output.color = input.diffuse;\n"
-            : (has_normal
-                   ? "    output.color = "
-                     "float4(abs(normalize(input.normal)), 1.0f);\n"
-                   : "    output.color = float4(0.75f, 0.75f, 0.78f, 1.0f);\n"),
-        has_texcoord
-            ? "    output.texcoord = input.texcoord;\n"
-            : "    output.texcoord = float2(0.0f, 0.0f);\n",
-        four_coords
-            ? "    output.texcoord1 = input.texcoord1;\n"
-              "    output.texcoord2 = input.texcoord2;\n"
-              "    output.texcoord3 = input.texcoord3;\n"
-            : layout.texcoord_count == 2u ? "    output.texcoord1 = input.texcoord1;\n" : "",
-        /* z > 2.5: a kill-only stage-1 mask reads UV0. */
-        layout.texcoord_count == 2u
-            ? "    if (reflection_flags.z > 0.5f) output.reflection_coord = reflection_flags.z > 2.5f ? input.texcoord : input.texcoord1;\n"
-            : has_texcoord ? "    if (reflection_flags.z > 2.5f) output.reflection_coord = input.texcoord;\n" : "",
-        has_texcoord && !layout.pretransformed
-            ? (has_normal
-                /* Mesh-UV reflections (x == 2) may pair with stage-0 texgen. */
-                ? "    if (reflection_flags.x > 1.5f) output.reflection_coord = input.texcoord;\n"
-                  "    if (reflection_stage2_flags.w > 0.5f) output.reflection_coord2 = input.texcoord;\n"
-                  "    if (abs(filter_texel.z - 2.0f) < 0.5f) {\n"
-                  "        float3 uv = mul(float4(input.texcoord, 1, 0), reflection_transform).xyz;\n"
-                  "        output.texcoord = uv.xy; output.volume_coord = uv.z;\n"
-                  "    }\n"
-                  "    if (filter_texel.z > 2.5f) {\n"
-                  "        float3 g = mul(mul(float4(input.position, 1), reflection_world_view), reflection_transform).xyz;\n"
-                  "        output.texcoord = g.xy;\n"
-                  "        output.volume_coord = g.z;\n"
-                  "        output.projected_q = reflection_stage2_flags.z > 0.5f ? 1.0f : g.z;\n"
-                  "    }\n"
-                  "    if (abs(reflection_flags.x - 1.0f) < 0.5f || abs(filter_texel.z - 1.0f) < 0.5f ||\n"
-                  "        (reflection_stage2_flags.x > 0.5f && reflection_stage2_flags.w < 0.5f)) {\n"
-                  "        float3 eye = mul(float4(input.position, 1), reflection_world_view).xyz;\n"
-                  "        float3 n = mul(float4(input.normal, 0), reflection_normal).xyz;\n"
-                  "        if (reflection_flags.y > 0.5f) n = normalize(n);\n"
-                  "        float3 r = reflect(normalize(eye), n);\n"
-                  "        float2 generated = mul(float4(r, 1), reflection_transform).xy;\n"
-                  "        if (reflection_stage2_flags.x > 0.5f && reflection_stage2_flags.w < 0.5f)\n"
-                  "            output.reflection_coord2 = mul(float4(r, 1), reflection_transform2).xy;\n"
-                  "        if (filter_texel.z > 0.5f) output.texcoord = generated;\n"
-                  "        if (abs(reflection_flags.x - 1.0f) < 0.5f) output.reflection_coord = filter_texel.z > 0.5f\n"
-                  "            ? mul(float4(r, 1), reflection_transform1).xy : generated;\n"
-                  "    }\n"
-                /* shortcut: without a normal stream NV2A reads a zero inline normal, so
-                   r is the eye direction; check the inline register if env maps look wrong. */
-                : "    if (reflection_flags.x > 1.5f) output.reflection_coord = input.texcoord;\n"
-                  "    if (reflection_stage2_flags.w > 0.5f) output.reflection_coord2 = input.texcoord;\n"
-                  "    if (abs(filter_texel.z - 2.0f) < 0.5f) {\n"
-                  "        float3 uv = mul(float4(input.texcoord, 1, 0), reflection_transform).xyz;\n"
-                  "        output.texcoord = uv.xy; output.volume_coord = uv.z;\n"
-                  "    }\n"
-                  "    if (filter_texel.z > 2.5f) {\n"
-                  "        float3 g = mul(mul(float4(input.position, 1), reflection_world_view), reflection_transform).xyz;\n"
-                  "        output.texcoord = g.xy;\n"
-                  "        output.volume_coord = g.z;\n"
-                  "        output.projected_q = reflection_stage2_flags.z > 0.5f ? 1.0f : g.z;\n"
-                  "    }\n"
-                  "    if (abs(reflection_flags.x - 1.0f) < 0.5f || abs(filter_texel.z - 1.0f) < 0.5f ||\n"
-                  "        (reflection_stage2_flags.x > 0.5f && reflection_stage2_flags.w < 0.5f)) {\n"
-                  "        float3 eye = mul(float4(input.position, 1), reflection_world_view).xyz;\n"
-                  "        float3 r = normalize(eye);\n"
-                  "        float2 generated = mul(float4(r, 1), reflection_transform).xy;\n"
-                  "        if (reflection_stage2_flags.x > 0.5f && reflection_stage2_flags.w < 0.5f)\n"
-                  "            output.reflection_coord2 = mul(float4(r, 1), reflection_transform2).xy;\n"
-                  "        if (filter_texel.z > 0.5f) output.texcoord = generated;\n"
-                  "        if (abs(reflection_flags.x - 1.0f) < 0.5f) output.reflection_coord = filter_texel.z > 0.5f\n"
-                  "            ? mul(float4(r, 1), reflection_transform1).xy : generated;\n"
-                  "    }\n")
-            : "",
-        has_diffuse ? "input.color" : "reflection_diffuse",
-        four_coords
-            /* MINUS1_TO_1_D3D maps a texel byte b to (b - 128) / 127. */
-            ? "    if (filter_texel.w > 0.5f) {\n"
-              "        float3 n = (round(alpha_mask.Sample(mask_sampler, input.texcoord).rgb * 255.0f) - 128.0f) / 127.0f;\n"
-              "        float2 st = float2(dot(float3(input.texcoord1, input.texcoord2.x), n),\n"
-              "            dot(float3(input.texcoord2.y, input.texcoord3), n));\n"
-              "        shaded = guest_texture.Sample(guest_sampler, st * texture_flags.xy);\n"
-              "    } else if (texture_flags.z > 0.5f) {\n"
-              "        float4 t0 = guest_texture.Sample(guest_sampler, input.texcoord * texture_flags.xy);\n"
-              "        float4 t1 = guest_texture.Sample(guest_sampler, input.texcoord1 * texture_flags.xy);\n"
-              "        float4 t2 = guest_texture.Sample(guest_sampler, input.texcoord2 * texture_flags.xy);\n"
-              "        float4 t3 = guest_texture.Sample(guest_sampler, input.texcoord3 * texture_flags.xy);\n"
-              "        shaded = saturate(filter_flags.z *\n"
-              "            (saturate(filter_flags.y * (filter_constants[0] * t0 + filter_constants[1] * t1))\n"
-              "           + saturate(filter_flags.y * (filter_constants[2] * t2 + filter_constants[3] * t3))));\n"
-              "    } else\n"
-            : layout.texcoord_count == 2u
-            ? "    if (texture_flags.w > 0.5f) {\n"
-              "        float3 rgb = guest_texture.Sample(guest_sampler, input.texcoord1 * texture_flags.xy).rgb;\n"
-              "        float alpha = alpha_mask.Sample(mask_sampler, input.texcoord * lighting_flags.zw).a;\n"
-              "        shaded = input.color * float4(rgb, alpha);\n"
-              "    } else\n"
-            : has_texcoord
-            /* NV2A Gaussian-cubic: nine level-0 taps at one guest texel, 1-2-1 weights.
-               A scaled back buffer has n host texels per guest texel; each tap box-averages
-               them so thin highlights match the guest image instead of aliasing into halos. */
-            ? "    if (filter_flags.x > 1.5f) {\n"
-              "        float l = dot(guest_texture.Sample(guest_sampler, input.texcoord * texture_flags.xy).rgb,\n"
-              "            filter_constants[0].rgb);\n"
-              "        shaded = saturate(filter_constants[1] * clamp(l, -1.0f, 1.0f));\n"
-              "    } else if (filter_flags.x > 0.5f) {\n"
-              "        float2 uv = input.texcoord * texture_flags.xy;\n"
-              "        float tw, th;\n"
-              "        guest_texture.GetDimensions(tw, th);\n"
-              "        int2 n = clamp(int2(ceil(float2(tw, th) * filter_texel.xy - 0.01f)), 1, 8);\n"
-              "        float4 t0 = 0.0f;\n"
-              "        [unroll] for (int y = -1; y <= 1; ++y)\n"
-              "            [unroll] for (int x = -1; x <= 1; ++x)\n"
-              "                [loop] for (int j = 0; j < n.y; ++j)\n"
-              "                    [loop] for (int i = 0; i < n.x; ++i)\n"
-              "                        t0 += (2 - abs(x)) * (2 - abs(y)) / (16.0f * n.x * n.y) *\n"
-              "                            guest_texture.SampleLevel(guest_sampler, uv + (float2(x, y) +\n"
-              "                                (float2(i, j) + 0.5f) / float2(n) - 0.5f) * filter_texel.xy, 0);\n"
-              "        shaded = saturate(2.0f * (t0 - filter_constants[0]) - 1.0f);\n"
-              "    } else\n" : "",
-        /* The fixed-function diffuse default is white. Preserve texture alpha
-           before the shared alpha test and SRC_ALPHA blending. */
-        has_diffuse ? "*=" : "=");
-}
 
 LRESULT CALLBACK presenterWindowProc(
     HWND window,
@@ -1535,215 +1191,18 @@ bool compileDrawShader(
     return SUCCEEDED(result);
 }
 
-/* Builds the HLSL for one FVF, plus its vertex program when it has one. */
-bool drawShaderSource(
-    uint32_t fvf,
-    const DrawPipeline &pipeline,
-    RecompD3dVertexLayout &layout,
-    std::string &compiled_source)
-{
-    if (!recomp_d3d_fvf_layout(fvf, &layout)) {
-        return false;
-    }
-
-    const int source_size = buildDrawShaderSource(layout, nullptr, 0u, pipeline.coverage_only);
-    if (source_size < 0) return false;
-    compiled_source.resize(static_cast<size_t>(source_size) + 1u);
-    if (buildDrawShaderSource(layout, compiled_source.data(), compiled_source.size(),
-            pipeline.coverage_only) != source_size) return false;
-    compiled_source.resize(static_cast<size_t>(source_size));
-    if (pipeline.coverage_only) return true;
-    if (layout.blend_weight_count != 0u && !layout.pretransformed &&
-        layout.texcoord_offset != RECOMP_D3D_FVF_ABSENT) {
-        std::string reflection = "        if (blend_flags.x > 0.5f) {\n"
-            "            eye *= input.weights[0];\n";
-        const bool normal = layout.normal_offset != RECOMP_D3D_FVF_ABSENT;
-        if (normal) reflection += "            n *= input.weights[0];\n";
-        reflection += "            float remainder = 1.0f - input.weights[0];\n";
-        for (uint32_t i = 1u; i <= layout.blend_weight_count; ++i) {
-            const auto matrix = std::to_string(i - 1u);
-            const auto weight = i == layout.blend_weight_count ? "remainder" :
-                "input.weights[" + std::to_string(i) + "]";
-            reflection += "            eye += " + weight + " * mul(float4(input.position, 1), reflection_blend_world_view[" + matrix + "]).xyz;\n";
-            if (normal) reflection += "            n += " + weight + " * mul(float4(input.normal, 0), reflection_blend_normal[" + matrix + "]).xyz;\n";
-            if (i != layout.blend_weight_count) reflection += "            remainder -= " + weight + ";\n";
-        }
-        reflection += "        }\n";
-        const auto point = compiled_source.find(normal ? "        if (reflection_flags.y" : "        float3 r = normalize(eye);");
-        if (point == std::string::npos) return false;
-        compiled_source.insert(point, reflection);
-    }
-    if (layout.normal_offset != RECOMP_D3D_FVF_ABSENT && !layout.pretransformed &&
-        layout.diffuse_offset == RECOMP_D3D_FVF_ABSENT) {
-        std::string lighting = "    if (directional_flags.x > 0.5f) {\n"
-            "        float3 n = mul(float4(input.normal,0),directional_normals[0]).xyz;\n"
-            "        float3 world_pos = mul(float4(input.position,1),light_world[0]).xyz;\n";
-        if (layout.blend_weight_count) {
-            lighting += "        if (blend_flags.x > 0.5f) { n=0; world_pos=0; float remainder=1;\n";
-            for (uint32_t i=0; i<layout.blend_weight_count; ++i) {
-                const auto index=std::to_string(i);
-                lighting += "n += input.weights["+index+"] * mul(float4(input.normal,0),directional_normals["+index+"]).xyz;\n"
-                    "world_pos += input.weights["+index+"] * mul(float4(input.position,1),light_world["+index+"]).xyz;\n"
-                    "remainder -= input.weights["+index+"];\n";
-            }
-            lighting += "n += remainder * mul(float4(input.normal,0),directional_normals["+
-                std::to_string(layout.blend_weight_count)+"]).xyz;\n"
-                "world_pos += remainder * mul(float4(input.position,1),light_world["+
-                std::to_string(layout.blend_weight_count)+"]).xyz; }\n";
-        }
-        lighting += "        if (directional_flags.y > 0.5f && dot(n,n)>0) n *= rsqrt(dot(n,n));\n"
-            "        float3 rgb=directional_base.rgb, spec=0;\n"
-            "        for (uint i=0; i<(uint)directional_flags.z; ++i) {\n"
-            "            float3 l = directional_directions[i].xyz; float atten = 1;\n"
-            "            if (light_positions[i].w > 0.5f) {\n"
-            "                l = light_positions[i].xyz - world_pos;\n"
-            "                float d = length(l);\n"
-            "                float denominator = dot(light_attenuation[i].xyz,float3(1,d,d*d));\n"
-            "                atten = d <= light_attenuation[i].w && denominator > 0 ? 1/denominator : 0;\n"
-            "                l = d > 0 ? l/d : float3(0,0,0);\n"
-            "            }\n"
-            "            rgb += (directional_material.rgb * directional_colors[i].rgb * max(0,dot(n,l)) + light_ambient[i].rgb) * atten;\n"
-            "            if (light_view.w > 0 && dot(n,l) > 0)\n"
-            "                spec += atten*light_specular[i].rgb*pow(max(dot(n,normalize(l+light_view.xyz)),1e-6f),light_view.w);\n"
-            "        }\n"
-            "        output.color.rgb=saturate(rgb);\n"
-            "        if (directional_flags.w > 0.5f) output.color.a=directional_material.a;\n"
-            "        output.lit_specular=saturate(spec);\n"
-            "    }\n";
-        const auto uv = compiled_source.find("    output.texcoord =");
-        if (uv == std::string::npos) return false;
-        compiled_source.insert(uv, lighting);
-    }
-    if (pipeline.program_count) {
-        if (fvf != 0x112u && fvf != 0x012u && fvf != 0x142u && fvf != 0x442u) return false;
-        std::string body;
-        if (!recomp_d3d_vertex_program_source(pipeline.program, pipeline.program_count, fvf, body)) {
-            std::fprintf(stderr, "recomp d3d presenter: vertex program untranslated fvf=%03x count=%u\n",
-                fvf, pipeline.program_count);
-            return false;
-        }
-        const auto begin = compiled_source.find("VSOut vs_main(");
-        const auto end = compiled_source.find("float4 ps_main(", begin);
-        if (begin == std::string::npos || end == std::string::npos) return false;
-        compiled_source.replace(begin, end-begin, "VSOut vs_main(VSIn input) { VSOut output = (VSOut)0;\n" + body + "return output; }\n");
-        // Preserve q until the pixel shader so projection follows interpolation.
-        const std::string declaration = "struct VSOut {";
-        const auto fields = compiled_source.find(declaration);
-        if (fields == std::string::npos) return false;
-        compiled_source.insert(fields + declaration.size(), "\n    float2 program_q : TEXCOORD5;\n"
-            "    float program_fog : TEXCOORD8;\n    float4 program_t23 : TEXCOORD9;\n"
-            "    float4 program_d1 : COLOR1;\n");
-        const std::string pixel = "float4 ps_main(VSOut input) : SV_TARGET {";
-        const auto sample = compiled_source.find(pixel);
-        if (sample == std::string::npos) return false;
-        compiled_source.insert(sample + pixel.size(),
-            "\n    input.texcoord /= input.program_q.x;\n"
-            "    if (reflection_flags.z > 0.5f) input.reflection_coord /= input.program_q.y;\n");
-        // The stage effect's bump combiner; see RecompD3dPresenterDrawCommand::bump_env.
-        const std::string shaded = "    float4 shaded = input.color;\n";
-        const auto branch = compiled_source.find(shaded);
-        if (branch == std::string::npos) return false;
-        compiled_source.insert(branch + shaded.size(),
-            "    if (bump_fog.w > 1.5f) {\n"
-            "        float2 n = bump_map.Sample(bump_sampler, input.texcoord).rg;\n"
-            "        float4 t1 = guest_texture.Sample(guest_sampler, (input.reflection_coord +\n"
-            "            float2(dot(bump_matrix[0].xz, n), dot(bump_matrix[0].yw, n))) * texture_flags.xy);\n"
-            "        float4 t3 = alpha_mask.Sample(mask_sampler, input.program_t23.zw +\n"
-            "            float2(dot(bump_matrix[1].xz, n), dot(bump_matrix[1].yw, n)));\n"
-            "        float4 v0 = saturate(input.color), v1 = saturate(input.program_d1);\n"
-            "        float s = saturate(dot(v0.rgb * 2.0f - 1.0f, t3.rgb * 2.0f - 1.0f));\n"
-            "        s *= s; s *= s; s *= s;\n"
-            "        float3 r0 = clamp(s + v1.rgb * t1.a - 1.0f, -1.0f, 1.0f);\n"
-            "        r0 = clamp(r0 + t3.a * t1.rgb, -1.0f, 1.0f);\n"
-            "        float f = bump_fog.z > 0.5f ? saturate(bump_fog.x + bump_fog.y * input.program_fog) : 1.0f;\n"
-            "        shaded = float4(lerp(fog_color.rgb, saturate(r0), f), t3.a * v0.a);\n"
-            "    } else if (bump_fog.w > 0.5f) {\n"
-            "        float2 n = bump_map.Sample(bump_sampler, input.texcoord).rg;\n"
-            "        float4 t2 = guest_texture.Sample(guest_sampler, (input.program_t23.xy +\n"
-            "            float2(dot(bump_matrix[0].xz, n), dot(bump_matrix[0].yw, n))) * texture_flags.xy);\n"
-            "        float4 t3 = alpha_mask.Sample(mask_sampler, input.program_t23.zw +\n"
-            "            float2(dot(bump_matrix[1].xz, n), dot(bump_matrix[1].yw, n)));\n"
-            "        float k = t3.a * t3.a; k *= k;\n"
-            "        float4 v0 = saturate(input.color);\n"
-            "        float f = bump_fog.z > 0.5f ? saturate(bump_fog.x + bump_fog.y * input.program_fog) : 1.0f;\n"
-            "        shaded = float4(lerp(fog_color.rgb, t2.rgb * (1.0f - k) * v0.rgb, f), v0.a);\n"
-            "    } else\n");
-    }
-    if (fvf == 0x42u && pipeline.program_count == 0u) {
-        /* shortcut: trapezoidal alpha coverage and square caps approximate NV2A's
-           line filter, calibrate against hardware when comparing the line effect. */
-        compiled_source +=
-            "\n[maxvertexcount(8)] void gs_main(line VSOut v[2], inout TriangleStream<VSOut> output) {\n"
-            "    float4 style = filter_constants[0];\n"
-            "    if (style.x <= 0) return;\n"
-            "    VSOut a = v[0], b = v[1];\n"
-            "    [unroll] for (uint plane=0; plane<3; ++plane) {\n"
-            "        float da = plane==0 ? a.position.z : plane==1 ? a.position.w-a.position.z : a.position.w-1e-6f;\n"
-            "        float db = plane==0 ? b.position.z : plane==1 ? b.position.w-b.position.z : b.position.w-1e-6f;\n"
-            "        if (da<0 && db<0) return;\n"
-            "        if (da<0 || db<0) {\n"
-            "            float t=da/(da-db); VSOut c=(VSOut)0;\n"
-            "            c.position=lerp(a.position,b.position,t); c.color=lerp(a.color,b.color,t);\n"
-            "            if (da<0) a=c; else b=c;\n"
-            "        }\n"
-            "    }\n"
-            "    float2 delta=(b.position.xy/b.position.w-a.position.xy/a.position.w)/style.zw;\n"
-            "    float len=length(delta); if (len<1e-6f) return;\n"
-            "    float2 side=style.y>0 ? float2(-delta.y,delta.x)/len :\n"
-            "        (abs(delta.x)>=abs(delta.y) ? float2(0,1) : float2(1,0));\n"
-            "    uint layers=style.y>0 ? 4 : 2;\n"
-            "    for (uint i=0; i<layers; ++i) {\n"
-            "        float offset=style.y>0 ? (i==0 ? -(style.x+1)*0.5f : i==1 ? -abs(style.x-1)*0.5f :\n"
-            "            i==2 ? abs(style.x-1)*0.5f : (style.x+1)*0.5f) : (i==0 ? -style.x*0.5f : style.x*0.5f);\n"
-            "        float coverage=style.y>0 ? (i==0 || i==3 ? 0 : min(style.x,1)) : 1;\n"
-            "        VSOut p=a; p.position.xy+=side*offset*style.zw*p.position.w; p.color.a*=coverage; output.Append(p);\n"
-            "        p=b; p.position.xy+=side*offset*style.zw*p.position.w; p.color.a*=coverage; output.Append(p);\n"
-            "    }\n"
-            "}\n";
-    }
-    if (pipeline.scaled_depth_bias) {
-        const auto entry = compiled_source.find("float4 ps_main(");
-        if (entry == std::string::npos) return false;
-        compiled_source.replace(entry, 15, "float4 ps_color(");
-        compiled_source +=
-            "\nstruct DepthOutput { float4 color : SV_TARGET; float depth : SV_Depth; };\n"
-            "DepthOutput ps_main(VSOut input";
-        if (pipeline.sample_depth_bias) compiled_source += ", uint sample_index : SV_SampleIndex";
-        compiled_source +=
-            ") {\n"
-            "    DepthOutput output;\n"
-            "    float2 gradient = float2(ddx(input.position.z), ddy(input.position.z));\n"
-            "    float depth = input.position.z;\n";
-        // SV_Position already includes viewport mapping and native constant bias.
-        // Only depth moves to the sample; color/UV/discard retain pixel-center inputs.
-        if (pipeline.sample_depth_bias) compiled_source +=
-            "    depth += dot(gradient, GetRenderTargetSamplePosition(sample_index));\n";
-        compiled_source +=
-            "    float slope = max(abs(gradient.x) * raster_bias.x, abs(gradient.y) * raster_bias.y);\n"
-            "    output.depth = saturate(depth + raster_bias.z * slope);\n"
-            "    output.color = ps_color(input); return output;\n}\n";
-    }
-    return true;
-}
-
-/* Every FVF seen across all logged runs (14). Compiling them at boot keeps
-   first use of each scene from stalling ~85 ms per shader. */
-constexpr uint32_t kBootDrawFvfs[] = {
-    0x042u, 0x104u, 0x112u, 0x116u, 0x118u, 0x11Au,
-    0x142u, 0x144u, 0x212u, 0x216u, 0x21Au, 0x242u, 0x244u, 0x404u};
-
 // ponytail: fixed list; vertex-program shaders and unlisted FVFs still compile on first use.
 void precompileDrawShaders(const std::atomic<bool> *stop)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     const ULONGLONG start = GetTickCount64();
-    static const DrawPipeline no_program{};
     uint32_t compiled = 0u;
     try {
-        for (const uint32_t fvf : kBootDrawFvfs) {
+        for (const uint32_t fvf : kRecompD3dBootDrawFvfs) {
             RecompD3dVertexLayout layout;
             std::string source;
-            if (!drawShaderSource(fvf, no_program, layout, source)) continue;
+            const RecompD3dDrawShaderKey key{fvf, 0u, nullptr, false, false, false};
+            if (!recomp_d3d_draw_shader_source(key, layout, source)) continue;
             for (const char *stage : {"vs", "ps"}) {
                 if (stop->load()) return;
                 ID3DBlob *blob = nullptr;
@@ -1769,7 +1228,9 @@ bool createDrawPipeline(
 {
     RecompD3dVertexLayout layout;
     std::string compiled_source;
-    if (!drawShaderSource(fvf, pipeline, layout, compiled_source)) {
+    const RecompD3dDrawShaderKey key{fvf, pipeline.program_count, pipeline.program,
+        pipeline.coverage_only, pipeline.scaled_depth_bias, pipeline.sample_depth_bias};
+    if (!recomp_d3d_draw_shader_source(key, layout, compiled_source)) {
         return false;
     }
 
@@ -2814,7 +2275,7 @@ RecompD3dPresenterError submitDraw(
     const RecompD3dPresenterDrawCommand &draw, bool coverage_only = false)
 {
     const bool screen_offset = draw.screen_space_offset[0] != 0.0f || draw.screen_space_offset[1] != 0.0f;
-    const bool geometry_line = draw.line_antialias || draw.line_width > 1.0f;
+    const bool geometry_line = recomp_d3d_draw_geometry_line(draw);
     // shortcut: programmable offsets are unsupported, add their viewport contract when needed.
     if (draw.vertex_bytes == nullptr || draw.index_bytes == nullptr ||
         (draw.texture_factor_color_scale != 0u && draw.texture_factor_color_scale != 2u &&
@@ -3045,215 +2506,26 @@ RecompD3dPresenterError submitDraw(
     /* Observation only: bind counts say what the guest selected, not what a
        draw actually consumed, and only the latter can explain the frame. */
     if (!coverage_only) recompD3dPresenterCountDrawTexture(draw, texture_view != nullptr);
-    float draw_constants[140 + 192 * 4 + 512 + 4]{};
-    /* Restore depth slope per guest pixel after anisotropic host scaling.
-       Constant bias stays in the native D24 rasterizer, after clipping. */
-    if (pipeline->scaled_depth_bias) {
-        draw_constants[1420] = presenter->target_scale_x;
-        draw_constants[1421] = presenter->target_scale_y;
-        draw_constants[1422] = draw.slope_scaled_depth_bias;
-    }
-    if (draw.texture.volume_depth != 0u) {
-        if (draw.fvf != 0x142u || draw.program_count || draw.has_reflection || draw.has_alpha_mask ||
-            draw.stage1_alpha_mask || draw.bump_env || draw.distortion || draw.four_tap_filter ||
-            draw.bright_pass || draw.texgen_reflection)
-            return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-        draw_constants[140 + 192 * 4 + 510] = 1.0f;
-    }
-    std::memcpy(draw_constants, draw.transform, sizeof draw.transform);
-    std::memcpy(draw_constants + 16, draw.blend_transforms, sizeof draw.blend_transforms);
-    if (layout.pretransformed || draw.program_count || screen_offset) {
-        D3D11_VIEWPORT viewport{};
-        UINT count = 1u;
-        presenter->context->RSGetViewports(&count, &viewport);
-        /* Guest pixel coordinates stay in guest units on a scaled target. */
-        viewport.TopLeftX /= presenter->target_scale_x;
-        viewport.TopLeftY /= presenter->target_scale_y;
-        viewport.Width /= presenter->target_scale_x;
-        viewport.Height /= presenter->target_scale_y;
-        if (count != 1u || viewport.Width <= 0.0f || viewport.Height <= 0.0f ||
-            viewport.MaxDepth <= viewport.MinDepth) {
-            return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-        }
-        if (layout.pretransformed || draw.program_count) {
-            /* Undo the bound viewport; legacy pixel centers are integers, while
-               D3D11 centers are half integers. The shader restores clip W from RHW. */
-            std::memset(draw_constants, 0, sizeof draw.transform);
-            draw_constants[0] = 2.0f / viewport.Width;
-            draw_constants[5] = -2.0f / viewport.Height;
-            draw_constants[10] = 1.0f / (viewport.MaxDepth - viewport.MinDepth);
-            draw_constants[12] = -1.0f + (0.5f - viewport.TopLeftX) * draw_constants[0];
-            draw_constants[13] = 1.0f + (0.5f - viewport.TopLeftY) * draw_constants[5];
-            draw_constants[14] = -viewport.MinDepth * draw_constants[10];
-            draw_constants[15] = 1.0f;
-        }
-        if (screen_offset) {
-            const float width = sub_viewport ? draw.viewport[2] : viewport.Width;
-            const float height = sub_viewport ? draw.viewport[3] : viewport.Height;
-            const float dx = 2.0f * draw.screen_space_offset[0] / width;
-            const float dy = -2.0f * draw.screen_space_offset[1] / height;
-            if (width <= 0.0f || height <= 0.0f || !std::isfinite(dx) || !std::isfinite(dy))
-                return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-            // Post-compose every WVP so the displacement survives perspective division and blending.
-            for (unsigned row = 0; row < 64; row += 4) {
-                draw_constants[row] += dx * draw_constants[row + 3];
-                draw_constants[row + 1] += dy * draw_constants[row + 3];
-            }
-        }
-    }
-    if (draw.program_count) {
-        std::memcpy(draw_constants + 140, draw.program_constants, sizeof draw.program_constants);
-        /* Undo the guest sample grid, which may differ from the host target. */
-        for (unsigned axis = 0; axis < 2; ++axis) {
-            const float scale = draw.program_constants[58][axis];
-            if (!std::isfinite(scale) || scale == 0) return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-            draw_constants[axis * 5] = 1.0f / scale;
-            draw_constants[12 + axis] = -draw.program_constants[59][axis] / scale;
-        }
-        const float depth_scale = draw.program_constants[58][2];
-        if (!std::isfinite(depth_scale) || depth_scale <= 0) return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-        draw_constants[10] = 1.0f / depth_scale;
-        draw_constants[14] = -draw.program_constants[59][2] / depth_scale;
-        draw_constants[138] = draw.program_alpha_mask ? 1.0f : 0.0f;
-        draw_constants[139] = draw.program_mask_lod_bias;
-    }
-    if (draw.directional.enabled && !draw.program_count) {
-        const auto &light = draw.directional;
-        if (light.count > 8u) return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-        float *constants = draw_constants + 140 + 192 * 4;
-        std::memcpy(constants, light.normal_transforms, sizeof light.normal_transforms);
-        std::memcpy(constants+64, light.ambient_emissive, sizeof light.ambient_emissive);
-        std::memcpy(constants+68, light.material_diffuse, sizeof light.material_diffuse);
-        std::memcpy(constants+72, light.directions, sizeof light.directions);
-        std::memcpy(constants+104, light.colors, sizeof light.colors);
-        constants[136]=1;
-        constants[137]=light.normalize ? 1.0f:0.0f;
-        constants[138]=static_cast<float>(light.count);
-        constants[139]=light.stage_mode ? 1.0f:0.0f;
-        std::memcpy(constants+140, light.world_transforms, sizeof light.world_transforms);
-        std::memcpy(constants+204, light.positions, sizeof light.positions);
-        std::memcpy(constants+236, light.attenuation, sizeof light.attenuation);
-        std::memcpy(constants+268, light.ambient, sizeof light.ambient);
-        std::memcpy(constants+300, light.specular, sizeof light.specular);
-        std::memcpy(constants+332, light.view, sizeof light.view);
-        std::memcpy(constants+336, light.stage, sizeof light.stage);
-    } else if (draw.directional.stage_mode) {
-        // Unlit stage-0 selection: input.color is the vertex diffuse or a program's oD0.
-        float *constants = draw_constants + 140 + 192 * 4;
-        constants[139] = 1.0f;
-        std::memcpy(constants + 336, draw.directional.stage, sizeof draw.directional.stage);
-    }
-    draw_constants[64] = texture_view != nullptr ? 1.0f : 0.0f;
-    draw_constants[65] = draw.depth.alpha_test_enable ? 1.0f : 0.0f;
-    draw_constants[66] = static_cast<float>(draw.depth.alpha_func);
-    draw_constants[67] = static_cast<float>(draw.depth.alpha_ref);
-    draw_constants[68] = draw.blend_weight_count != 0u ? 1.0f : 0.0f;
-    draw_constants[69] = draw.use_texture_factor ? 1.0f : draw.texture_factor_modulate ? 5.0f
-        : draw.modulate_texture_factor_alpha ? 4.0f
-        : draw.modulate_texture_factor ? 2.0f : draw.texture_factor_color_scale == 4u ? 6.0f
-        : draw.texture_factor_color_scale == 2u ? 3.0f : 0.0f;
-    draw_constants[70] = draw.material_alpha_mode == RECOMP_D3D_MATERIAL_ALPHA_NONE
-        ? 1.0f : draw.material_alpha;
-    draw_constants[71] = draw.material_alpha_mode == RECOMP_D3D_MATERIAL_ALPHA_SELECT_VERTEX_DIFFUSE
-        ? 3.0f : draw.material_alpha_mode == RECOMP_D3D_MATERIAL_ALPHA_SELECT_TEXTURE
-        ? 2.0f : draw.material_alpha_mode == RECOMP_D3D_MATERIAL_ALPHA_SELECT_DIFFUSE
-        ? 1.0f : 0.0f;
-    draw_constants[72] = ((draw.texture_factor >> 16u) & 0xffu) / 255.0f;
-    draw_constants[73] = ((draw.texture_factor >> 8u) & 0xffu) / 255.0f;
-    draw_constants[74] = (draw.texture_factor & 0xffu) / 255.0f;
-    draw_constants[75] = ((draw.texture_factor >> 24u) & 0xffu) / 255.0f;
-    draw_constants[76] = draw.zero_diffuse_rgb ? 1.0f : 0.0f;
-    /* NV2A A8 supplies white RGB; DXGI A8 supplies only alpha. */
-    draw_constants[77] = draw.texture.format_byte == RECOMP_D3D_TEXTURE_FORMAT_A8 ||
-        draw.texture_alpha_only ? 1.0f : 0.0f;
-    draw_constants[80] = draw.texture.linear && draw.texture.width != 0u
-        ? 1.0f / draw.texture.width : 1.0f;
-    draw_constants[81] = draw.texture.linear && draw.texture.height != 0u
-        ? 1.0f / draw.texture.height : 1.0f;
-    draw_constants[82] = draw.four_tap_filter ? 1.0f : 0.0f;
-    draw_constants[78] = draw.alpha_mask.linear && draw.alpha_mask.width
-        ? 1.0f / draw.alpha_mask.width : 1.0f;
-    draw_constants[79] = draw.alpha_mask.linear && draw.alpha_mask.height
-        ? 1.0f / draw.alpha_mask.height : 1.0f;
-    draw_constants[83] = draw.has_alpha_mask ? 1.0f : 0.0f;
+    float draw_constants[kRecompD3dDrawConstantFloats];
     {
-        float *filter = draw_constants + 140 + 192 * 4 + 340;
-        const auto unpack = [](uint32_t argb, float *rgba) {
-            rgba[0] = ((argb >> 16u) & 0xffu) / 255.0f;
-            rgba[1] = ((argb >> 8u) & 0xffu) / 255.0f;
-            rgba[2] = (argb & 0xffu) / 255.0f;
-            rgba[3] = (argb >> 24u) / 255.0f;
-        };
-        if (draw.bright_pass) {
-            filter[0] = 1.0f;
-            filter[4] = 1.0f / draw.texture.width;
-            filter[5] = 1.0f / draw.texture.height;
-            unpack(draw.bright_pass_threshold, filter + 8);
-        }
-        if (draw.luminance_tint) {
-            filter[0] = 2.0f;
-            unpack(draw.luminance_tint_factors[0], filter + 8);
-            unpack(draw.luminance_tint_factors[1], filter + 12);
-        }
-        filter[3] = draw.alpha_kill ? 1.0f : 0.0f;
-        filter[6] = draw.texgen_reflection ? 1.0f : draw.texture_transform_uv ? 2.0f
-            : draw.texgen_projected ? 3.0f : 0.0f;
-        filter[7] = draw.distortion ? 1.0f : 0.0f;
-        if (draw.four_tap_filter) {
-            filter[1] = draw.four_tap_scale;
-            filter[2] = draw.four_tap_sum_scale;
-            for (unsigned i = 0u; i < 4u; ++i) unpack(draw.four_tap_factors[i], filter + 8 + i * 4);
-        }
-    }
-    if (draw.has_reflection || draw.texgen_reflection || draw.texture_transform_uv || draw.texgen_projected) {
-        std::memcpy(draw_constants + 84, draw.reflection_world_view, 64u);
-        std::memcpy(draw_constants + 100, draw.reflection_normal, 64u);
-        std::memcpy(draw_constants + 116, draw.reflection_transform, 64u);
-        draw_constants[137] = draw.reflection_normalize ? 1.0f : 0.0f;
-        std::memcpy(draw_constants + 140 + 192 * 4 + 396, draw.reflection_blend_world_view,
-            sizeof draw.reflection_blend_world_view);
-        std::memcpy(draw_constants + 140 + 192 * 4 + 444, draw.reflection_blend_normal,
-            sizeof draw.reflection_blend_normal);
-    }
-    if (draw.has_reflection) {
-        draw_constants[140 + 192 * 4 + 509] = draw.reflection_alpha_kill ? 1.0f : 0.0f;
-        std::memcpy(draw_constants + 132, draw.reflection_diffuse, 16u);
-        draw_constants[136] = draw.reflection_mesh_uv ? 2.0f : 1.0f;
-        draw_constants[139] = (draw.reflection_premultiplied ? 1.0f : 0.0f) +
-            (draw.reflection_skip_diffuse ? 2.0f : 0.0f);
-        if (draw.texgen_reflection && !draw.reflection_mesh_uv)
-            std::memcpy(draw_constants + 140 + 192 * 4 + 364, draw.reflection_stage1_transform, 64u);
-    }
-    if (draw.reflection_stage2) {
-        std::memcpy(draw_constants + 140 + 192 * 4 + 492, draw.reflection_stage2_transform, 64u);
-        draw_constants[140 + 192 * 4 + 508] = 1.0f;
-        draw_constants[140 + 192 * 4 + 511] = draw.reflection_stage2_mesh_uv ? 1.0f : 0.0f;
-    }
-    if (draw.stage1_alpha_mask)
-        draw_constants[138] = draw.stage1_kill_only ? 3.0f : draw.stage1_alpha_kill ? 2.0f : 1.0f;
-    if (draw.bump_env) {
-        float *bump = draw_constants + 140 + 192 * 4 + 380;
-        std::memcpy(bump, draw.bump_matrices, sizeof draw.bump_matrices);
-        std::memcpy(bump + 8, draw.bump_fog, sizeof draw.bump_fog);
-        bump[11] = draw.bump_water ? 2.0f : 1.0f;
-        bump[12] = ((draw.fog_color >> 16u) & 0xffu) / 255.0f;
-        bump[13] = ((draw.fog_color >> 8u) & 0xffu) / 255.0f;
-        bump[14] = (draw.fog_color & 0xffu) / 255.0f;
-    }
-
-    if (geometry_line) {
         D3D11_VIEWPORT viewport{};
         UINT count = 1u;
         presenter->context->RSGetViewports(&count, &viewport);
-        if (count != 1u || viewport.Width <= 0 || viewport.Height <= 0)
+        RecompD3dDrawTargetState target{};
+        if (count == 1u) {
+            target.viewport[0] = viewport.TopLeftX;
+            target.viewport[1] = viewport.TopLeftY;
+            target.viewport[2] = viewport.Width;
+            target.viewport[3] = viewport.Height;
+            target.viewport[4] = viewport.MinDepth;
+            target.viewport[5] = viewport.MaxDepth;
+        }
+        target.scale_x = presenter->target_scale_x;
+        target.scale_y = presenter->target_scale_y;
+        if (!recomp_d3d_draw_constants(draw, layout, target, texture_view != nullptr,
+                pipeline->scaled_depth_bias, draw_constants)) {
             return RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND;
-        float *style = draw_constants + 140 + 192 * 4 + 340 + 8;
-        style[0] = draw.line_width;
-        style[1] = draw.line_antialias ? 1.0f : 0.0f;
-        style[2] = sub_viewport ? 2.0f / draw.viewport[2]
-            : 2.0f * presenter->target_scale_x / viewport.Width;
-        style[3] = sub_viewport ? -2.0f / draw.viewport[3]
-            : -2.0f * presenter->target_scale_y / viewport.Height;
+        }
     }
     UINT index_offset = 0u;
     if (!uploadRing(presenter, &presenter->draw_index_buffer,
@@ -4224,7 +3496,7 @@ RecompD3dPresenterError endVisibility(RecompD3dPresenter *presenter, uint32_t in
 
 } // namespace
 
-RecompD3dPresenterError d3d11_backend_create(
+RecompD3dPresenterError d3d_backend_create(
     const RecompD3dPresenterConfig *config,
     RecompD3dPresenter **presenter)
 {
@@ -4347,7 +3619,7 @@ static void logDraw(RecompD3dPresenter *presenter, const RecompD3dPresenterDrawC
     ++presenter->draw_log_index;
 }
 
-RecompD3dPresenterError d3d11_backend_submit(
+RecompD3dPresenterError d3d_backend_submit(
     RecompD3dPresenter *presenter,
     const RecompD3dPresenterCommand *command)
 {
@@ -4389,7 +3661,7 @@ RecompD3dPresenterError d3d11_backend_submit(
     }
 }
 
-RecompD3dPresenterError d3d11_backend_draw_coverage(
+RecompD3dPresenterError d3d_backend_draw_coverage(
     RecompD3dPresenter *presenter, const RecompD3dPresenterDrawCommand *draw, bool *covered)
 {
     if (covered) *covered = true;
@@ -4500,7 +3772,7 @@ RecompD3dPresenterError d3d11_backend_draw_coverage(
     return error;
 }
 
-RecompD3dPresenterError d3d11_backend_release_memory(
+RecompD3dPresenterError d3d_backend_release_memory(
     RecompD3dPresenter *presenter, uint32_t base, uint32_t size, bool targets)
 {
     if (presenter == nullptr || presenter != active_presenter) {
@@ -4564,7 +3836,7 @@ RecompD3dPresenterError d3d11_backend_release_memory(
     return RECOMP_D3D_PRESENTER_OK;
 }
 
-RecompD3dPresenterError d3d11_backend_destroy(
+RecompD3dPresenterError d3d_backend_destroy(
     RecompD3dPresenter **presenter)
 {
     if (presenter == nullptr) {
@@ -4587,32 +3859,32 @@ RecompD3dPresenterError d3d11_backend_destroy(
     return RECOMP_D3D_PRESENTER_OK;
 }
 
-void d3d11_backend_set_immediate_present(bool enabled)
+void d3d_backend_set_immediate_present(bool enabled)
 {
     immediate_present = enabled;
 }
 
-D3d11VisibilityPoll d3d11_backend_poll_visibility(
+D3dBackendVisibilityPoll d3d_backend_poll_visibility(
     RecompD3dPresenter *presenter, uint32_t *index, uint32_t *pixels)
 {
     if (presenter == nullptr || presenter != active_presenter ||
-        GetCurrentThreadId() != presenter->owner_thread) return D3D11_VISIBILITY_FAILED;
-    if (presenter->visibility_pending.empty()) return D3D11_VISIBILITY_IDLE;
+        GetCurrentThreadId() != presenter->owner_thread) return D3D_BACKEND_VISIBILITY_FAILED;
+    if (presenter->visibility_pending.empty()) return D3D_BACKEND_VISIBILITY_IDLE;
     const auto front = presenter->visibility_pending.front();
     UINT64 samples = 0u;
     const HRESULT result = presenter->context->GetData(front.query, &samples, sizeof samples, 0u);
-    if (result == S_FALSE) return D3D11_VISIBILITY_PENDING;
-    if (FAILED(result)) return D3D11_VISIBILITY_FAILED;
+    if (result == S_FALSE) return D3D_BACKEND_VISIBILITY_PENDING;
+    if (FAILED(result)) return D3D_BACKEND_VISIBILITY_FAILED;
     presenter->visibility_pending.erase(presenter->visibility_pending.begin());
     presenter->visibility_free.push_back(front.query);
     *index = front.index;
     *pixels = static_cast<uint32_t>((std::min)(
         std::floor(static_cast<double>(samples) / front.samples_per_pixel + 0.5), 4294967295.0));
-    return D3D11_VISIBILITY_READY;
+    return D3D_BACKEND_VISIBILITY_READY;
 }
 
 
-void d3d11_backend_report_draw_textures(void)
+void d3d_backend_report_draw_textures(void)
 {
     for (uint32_t format = 0u; format < 256u; ++format) {
         const uint32_t sampled = draw_texture_tally.textured[format];

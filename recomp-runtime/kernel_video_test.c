@@ -4,6 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+/* _putenv_s with an empty value removes the variable, as on Windows. */
+static int _putenv_s(const char *name, const char *value)
+{
+    return value[0] != '\0' ? setenv(name, value, 1) : unsetenv(name);
+}
+#endif
+
 enum {
     TEST_MEMORY_BASE = 0x2a000000u,
     TEST_MEMORY_SIZE = 0x00001000u,

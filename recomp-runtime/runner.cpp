@@ -30,6 +30,10 @@ RecompFunction recomp_program_lookup(std::uint32_t address);
 #include <string>
 #include <vector>
 #include <charconv>
+#ifndef _WIN32
+#include <strings.h>
+#define _stricmp strcasecmp
+#endif
 
 static RecompInputPulseSource inputPulses;
 static bool scriptedInputOnly;

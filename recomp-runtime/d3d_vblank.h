@@ -1,6 +1,7 @@
 #ifndef DOAXBV_RECOMP_D3D_VBLANK_H
 #define DOAXBV_RECOMP_D3D_VBLANK_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus

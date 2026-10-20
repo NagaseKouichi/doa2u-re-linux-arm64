@@ -1,10 +1,27 @@
 #include "d3d_presenter.h"
-#include "d3d_presenter_d3d11_backend.h"
+#include "d3d_presenter_backend.h"
 #include "d3d_card_model.h"
 #include "d3d_draw_model.h"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include "win32_compat.h"
+#include <SDL3/SDL.h>
+#include <stdlib.h>
+
+/* The SDL_GPU backend: _putenv_s with an empty value removes the variable. */
+static int _putenv_s(const char *name, const char *value)
+{
+    return value[0] != '\0' ? setenv(name, value, 1) : unsetenv(name);
+}
+
+static ULONGLONG GetTickCount64()
+{
+    return SDL_GetTicks();
+}
+#endif
 
 #include <cmath>
 #include <algorithm>
@@ -57,6 +74,7 @@ static bool destroy(RecompD3dPresenter *&presenter)
     return passed && presenter == nullptr;
 }
 
+#ifdef _WIN32
 static HWND presenterWindow()
 {
     HWND window = nullptr;
@@ -68,6 +86,7 @@ static HWND presenterWindow()
     }
     return nullptr;
 }
+#endif
 
 static bool testTicks()
 {
@@ -145,7 +164,7 @@ static bool testMipSampler()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "mip", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create mip sampler", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create mip sampler", d3d_backend_create(&config, &presenter));
     if (passed) {
         struct Vertex { float x, y, z, rhw; uint32_t diffuse; float u, v; };
         Vertex vertices[] = {
@@ -159,7 +178,7 @@ static bool testMipSampler()
         const uint32_t mips[] = {0xf800f800u, 0u, 0x07e007e0u, 0u, 0x001f001fu, 0u};
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("mip clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("mip clear", d3d_backend_submit(presenter, &clear));
         RecompD3dPresenterCommand command{};
         command.type = RECOMP_D3D_PRESENTER_COMMAND_DRAW;
         auto &draw = command.data.draw;
@@ -187,13 +206,13 @@ static bool testMipSampler()
         // Exceed the cache once, then revisit the four samplers below.
         for (unsigned i = 0; i < 65 && passed; ++i) {
             draw.mip_lod_bias = -8.0f + i * 0.25f;
-            passed &= expect("mip cache eviction", d3d11_backend_submit(presenter, &command));
+            passed &= expect("mip cache eviction", d3d_backend_submit(presenter, &command));
         }
         const float biases[] = {0.0f, 1.25f, 1.25f, -2.0f};
         for (unsigned i = 0; i < 4 && passed; ++i) {
             draw.point_mip_filter = i == 1 || i == 3;
             draw.mip_lod_bias = biases[i];
-            passed &= expect("mip draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("mip draw", d3d_backend_submit(presenter, &command));
             for (auto &vertex : vertices) vertex.x += 64.0f;
         }
         for (auto &vertex : vertices) {
@@ -205,7 +224,7 @@ static bool testMipSampler()
         draw.material_alpha = 1.0f;
         draw.depth.alpha_func = RECOMP_D3D_COMPARE_GREATER_EQUAL;
         draw.mip_lod_bias = 0.0f;
-        passed &= expect("vertex alpha discard", d3d11_backend_submit(presenter, &command));
+        passed &= expect("vertex alpha discard", d3d_backend_submit(presenter, &command));
         // Lit sprites use material alpha once, with white expanded vertex alpha.
         for (auto &vertex : vertices) {
             vertex.x += 64.0f;
@@ -227,24 +246,24 @@ static bool testMipSampler()
         draw.blend.blend_enable = true;
         draw.blend.src_factor = RECOMP_D3D_BLEND_SRC_ALPHA;
         draw.blend.dst_factor = RECOMP_D3D_BLEND_INV_SRC_ALPHA;
-        passed &= expect("lit sprite alpha", d3d11_backend_submit(presenter, &command));
+        passed &= expect("lit sprite alpha", d3d_backend_submit(presenter, &command));
         for (auto &vertex : vertices) { vertex.x += 64.0f; vertex.diffuse = 0x00123456u; }
         draw.material_alpha_mode = RECOMP_D3D_MATERIAL_ALPHA_NONE;
         draw.texture_factor = 0x40804020u;
         draw.directional.stage_mode = true;
         draw.directional.stage[0] = draw.directional.stage[2] = 1;
         draw.directional.stage[1] = draw.directional.stage[3] = 2;
-        passed &= expect("sprite texture factor", d3d11_backend_submit(presenter, &command));
+        passed &= expect("sprite texture factor", d3d_backend_submit(presenter, &command));
         for (float bias : {-16.01f, 16.0f, INFINITY, NAN}) {
             draw.mip_lod_bias = bias;
-            passed &= expect("invalid mip bias", d3d11_backend_submit(presenter, &command),
+            passed &= expect("invalid mip bias", d3d_backend_submit(presenter, &command),
                 RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
         }
         command = {};
         command.type = RECOMP_D3D_PRESENTER_COMMAND_PRESENT;
         command.data.present = {5, 1};
-        passed &= expect("mip present", d3d11_backend_submit(presenter, &command));
-        passed &= expect("destroy mip sampler", d3d11_backend_destroy(&presenter));
+        passed &= expect("mip present", d3d_backend_submit(presenter, &command));
+        passed &= expect("destroy mip sampler", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             for (unsigned i = 0; i < 7; ++i) {
                 unsigned char bgr[3]{};
@@ -279,11 +298,11 @@ static bool testLines()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "lin", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create lines", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create lines", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("lines clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("lines clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z; uint32_t color; };
         Vertex vertices[2] = {{20,20.25f,0.5f,~0u}, {100,20.25f,0.5f,~0u}};
         const uint16_t indices[2] = {0,1};
@@ -308,27 +327,27 @@ static bool testLines()
         draw.line_antialias = true;
         draw.line_width = 1.25f;
         draw.cull_mode = RECOMP_D3D_CULL_CLOCKWISE;
-        passed &= expect("fractional line", d3d11_backend_submit(presenter, &command));
+        passed &= expect("fractional line", d3d_backend_submit(presenter, &command));
         for (auto &v : vertices) v.y = 40.5f;
         std::swap(vertices[0], vertices[1]);
         draw.line_width = 0.25f;
-        passed &= expect("subpixel line", d3d11_backend_submit(presenter, &command));
+        passed &= expect("subpixel line", d3d_backend_submit(presenter, &command));
         std::swap(vertices[0], vertices[1]);
         // Near-plane clipping keeps the second half; the fully hidden line emits nothing.
         for (auto &v : vertices) v.y = 60.5f;
         vertices[0].z = -0.5f;
         draw.line_width = 1;
-        passed &= expect("near crossing line", d3d11_backend_submit(presenter, &command));
+        passed &= expect("near crossing line", d3d_backend_submit(presenter, &command));
         for (auto &v : vertices) { v.y = 80.5f; v.z = -1; }
-        passed &= expect("hidden line", d3d11_backend_submit(presenter, &command));
+        passed &= expect("hidden line", d3d_backend_submit(presenter, &command));
         // A later aliased line must use the ordinary pipeline again.
         for (auto &v : vertices) { v.y = 100.5f; v.z = 0.5f; }
         draw.line_antialias = false;
-        passed &= expect("ordinary line", d3d11_backend_submit(presenter, &command));
+        passed &= expect("ordinary line", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5,1};
-        passed &= expect("lines present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy lines", d3d11_backend_destroy(&presenter));
+        passed &= expect("lines present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy lines", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             const unsigned pixels[][3] = {{50,20,223}, {50,19,96}, {50,18,0}, {50,40,64},
                 {40,60,0}, {80,60,255}, {50,80,0}, {50,100,255}};
@@ -358,11 +377,11 @@ static bool testLighting()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "lit", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create lighting", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create lighting", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("lighting clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("lighting clear", d3d_backend_submit(presenter, &clear));
         for (unsigned i = 0; i < 24 && passed; ++i) {
             struct Vertex { float x, y, z, nx, ny, nz, u, v; };
             Vertex vertices[] = {
@@ -523,16 +542,16 @@ static bool testLighting()
             }
             if (i == 8) {
                 draw.program_alpha_mask = true;
-                passed &= expect("reflection mask overlap", d3d11_backend_submit(presenter, &command),
+                passed &= expect("reflection mask overlap", d3d_backend_submit(presenter, &command),
                     RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
                 draw.program_alpha_mask = false;
             }
-            passed &= expect("lighting draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("lighting draw", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("lighting present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy lighting", d3d11_backend_destroy(&presenter));
+        passed &= expect("lighting present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy lighting", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             const int expected[][3] = {{102, 77, 108}, {26, 26, 32}, {54, 45, 67}, {6, 13, 26},
                 {108, 89, 77}, {255, 0, 0}, {0, 0, 0}, {102, 77, 108}, {30, 7, 10}, {21, 39, 21},
@@ -569,11 +588,11 @@ static bool testReflectionStage2(bool alpha_kill = false, bool mesh_uv = false)
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "en3", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create third reflection", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create third reflection", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("third reflection clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("third reflection clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z, nx, ny, nz, u, v; };
         const uint16_t indices[] = {0, 1, 2, 3};
         const unsigned alphas[] = {0, 128, 255};
@@ -632,12 +651,12 @@ static bool testReflectionStage2(bool alpha_kill = false, bool mesh_uv = false)
             // Own TEXTURE2 clamps to green; TEXTURE1, UV0 or WRAP would sample red.
             draw.reflection_stage2_transform[12] = 1.25f;
             draw.reflection_stage2_transform[13] = 0.25f;
-            passed &= expect("third reflection draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("third reflection draw", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("third reflection present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy third reflection", d3d11_backend_destroy(&presenter));
+        passed &= expect("third reflection present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy third reflection", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             const int expected[3][3] = {{8,0,16}, {4,24,8}, {0,96,0}};
             const int killed[3][3] = {{0,0,0}, {0,0,0}, {0,0,128}};
@@ -673,7 +692,7 @@ static bool testReflectionAddress(bool texgen, bool uv_transform = false, bool s
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "env", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create reflection", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create reflection", d3d_backend_create(&config, &presenter));
     if (passed) {
         struct Vertex { float x, y, z, nx, ny, nz, u, v; };
         const Vertex vertices[] = {
@@ -770,11 +789,11 @@ static bool testReflectionAddress(bool texgen, bool uv_transform = false, bool s
             draw.reflection_transform[0] = draw.reflection_transform[12] = 0.5f;
             draw.reflection_transform[13] = 0.25f;
         }
-        passed &= expect("clamped reflection draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("clamped reflection draw", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("reflection present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy reflection", d3d11_backend_destroy(&presenter));
+        passed &= expect("reflection present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy reflection", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // U 0.25 samples the red texel; U 1.25 clamps to green (WRAP would give red).
             // With texgen, yellow base halves with them (mesh UV would give blue base).
@@ -817,11 +836,11 @@ static bool testScreenSpaceOffsetAndScissor()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "off", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create screen offset", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create screen offset", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("offset clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("offset clear", d3d_backend_submit(presenter, &clear));
         const float offsets[][2] = {{12, 10}, {-12, -10}, {20, -14}, {-20, 14}};
         const uint16_t indices[] = {0, 1, 2, 3};
         for (unsigned i = 0; i < 4 && passed; ++i) {
@@ -873,12 +892,12 @@ static bool testScreenSpaceOffsetAndScissor()
                     std::memcpy(draw.viewport, viewport, sizeof viewport);
                 }
             }
-            passed &= expect("screen offset draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("screen offset draw", d3d_backend_submit(presenter, &command));
             if (i == 0) {
                 for (unsigned axis = 0; axis < 2; ++axis) {
                     for (float invalid : {INFINITY, NAN}) {
                         draw.screen_space_offset[axis] = invalid;
-                        passed &= expect("nonfinite screen offset", d3d11_backend_submit(presenter, &command),
+                        passed &= expect("nonfinite screen offset", d3d_backend_submit(presenter, &command),
                             RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
                     }
                     draw.screen_space_offset[axis] = offsets[i][axis];
@@ -891,9 +910,9 @@ static bool testScreenSpaceOffsetAndScissor()
                 draw.program[0][3] = 1; // One synthetic terminating NOP.
                 draw.program_constants[58][0] = draw.program_constants[58][1] = draw.program_constants[58][2] = 1;
                 draw.screen_space_offset[0] = draw.screen_space_offset[1] = 0;
-                passed &= expect("zero program screen offset", d3d11_backend_submit(presenter, &command));
+                passed &= expect("zero program screen offset", d3d_backend_submit(presenter, &command));
                 draw.screen_space_offset[0] = 0.5f;
-                passed &= expect("unsupported program screen offset", d3d11_backend_submit(presenter, &command),
+                passed &= expect("unsupported program screen offset", d3d_backend_submit(presenter, &command),
                     RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
             }
         }
@@ -915,18 +934,18 @@ static bool testScreenSpaceOffsetAndScissor()
         draw.has_scissor = true;
         const int32_t scissor[] = {40, 192, 100, 216};
         std::memcpy(draw.scissor, scissor, sizeof scissor);
-        passed &= expect("scissor draw", d3d11_backend_submit(presenter, &clipped));
+        passed &= expect("scissor draw", d3d_backend_submit(presenter, &clipped));
         draw.scissor[2] = 39;
-        passed &= expect("inverted scissor", d3d11_backend_submit(presenter, &clipped),
+        passed &= expect("inverted scissor", d3d_backend_submit(presenter, &clipped),
             RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
         draw.scissor[2] = 100;
         draw.has_scissor = false;
         for (auto &vertex : vertices) vertex.x += 152;
-        passed &= expect("scissor disabled draw", d3d11_backend_submit(presenter, &clipped));
+        passed &= expect("scissor disabled draw", d3d_backend_submit(presenter, &clipped));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("offset present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy offset", d3d11_backend_destroy(&presenter));
+        passed &= expect("offset present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy offset", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // Offset positions move; scissor edges stay absolute and exclude right/bottom.
             const unsigned pixels[][3] = {{34, 32, 255}, {22, 22, 0}, {70, 12, 255}, {82, 22, 0},
@@ -957,7 +976,7 @@ static bool testBrightPass()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "brt", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create bright pass", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create bright pass", d3d_backend_create(&config, &presenter));
     if (passed) {
         // 3x3 tiles: red 0.75 with a 1.0 centre, green 0.9, blue 0.5 (below threshold).
         uint32_t texels[9 * 9];
@@ -970,7 +989,7 @@ static bool testBrightPass()
         const uint16_t indices[] = {0, 1, 2, 3};
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("bright clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("bright clear", d3d_backend_submit(presenter, &clear));
         RecompD3dPresenterCommand command{RECOMP_D3D_PRESENTER_COMMAND_DRAW};
         auto &draw = command.data.draw;
         draw.primitive_type = RECOMP_D3D_PT_TRIANGLESTRIP;
@@ -996,9 +1015,9 @@ static bool testBrightPass()
         draw.texture_byte_count = sizeof texels;
         draw.bright_pass = true;
         draw.bright_pass_threshold = 0x1a1a1a1au;
-        passed &= expect("bright pass draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("bright pass draw", d3d_backend_submit(presenter, &command));
         draw.four_tap_filter = true;
-        passed &= expect("bright pass excludes four tap", d3d11_backend_submit(presenter, &command),
+        passed &= expect("bright pass excludes four tap", d3d_backend_submit(presenter, &command),
             RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
         // Four texel-centred taps of a 2x2 texture: red 0.6, 0.3, 0.9, 0; green 1.
         const uint32_t taps[] = {0xff99ff00u, 0xff4dff00u, 0xffe6ff00u, 0xff00ff00u};
@@ -1032,7 +1051,7 @@ static bool testBrightPass()
             for (unsigned i = 0; i < 4; ++i) filter.four_tap_factors[i] = weights[v][i & 1];
             filter.four_tap_scale = v ? 2.0f : 1.0f;
             filter.four_tap_sum_scale = v ? 0.5f : 1.0f;
-            passed &= expect("four tap draw", d3d11_backend_submit(presenter, &tap));
+            passed &= expect("four tap draw", d3d_backend_submit(presenter, &tap));
             for (auto &vertex : quad) vertex.x += 20;
         }
         // Composite: 2 * texture * 0.8, saturating at red 0.75 and keeping green 0.5 -> 0.8.
@@ -1053,7 +1072,7 @@ static bool testBrightPass()
         std::memcpy(composite_quad, vertices, sizeof vertices);
         for (auto &vertex : composite_quad) { vertex.x += 100; vertex.u = vertex.v = 0.5f; }
         mod.vertex_bytes = composite_quad;
-        passed &= expect("modulate2x draw", d3d11_backend_submit(presenter, &composite));
+        passed &= expect("modulate2x draw", d3d_backend_submit(presenter, &composite));
         // Trail strips: 1x texture * factor, red 0.6 and green 0.4.
         mod.texture_factor_color_scale = 0u;
         mod.texture_factor_modulate = true;
@@ -1061,7 +1080,7 @@ static bool testBrightPass()
         std::memcpy(trail_quad, composite_quad, sizeof composite_quad);
         for (auto &vertex : trail_quad) vertex.x += 40;
         mod.vertex_bytes = trail_quad;
-        passed &= expect("modulate draw", d3d11_backend_submit(presenter, &composite));
+        passed &= expect("modulate draw", d3d_backend_submit(presenter, &composite));
         // 4x color clamps red and leaves alpha independent of the factor's zero alpha.
         mod.texture_factor_modulate = false;
         mod.texture_factor_color_scale = 4u;
@@ -1070,9 +1089,9 @@ static bool testBrightPass()
         mod.depth.alpha_func = RECOMP_D3D_COMPARE_GREATER;
         mod.depth.alpha_ref = 128u;
         for (auto &vertex : trail_quad) vertex.x += 40;
-        passed &= expect("modulate4x draw", d3d11_backend_submit(presenter, &composite));
+        passed &= expect("modulate4x draw", d3d_backend_submit(presenter, &composite));
         mod.texture_factor_color_scale = 3u;
-        passed &= expect("invalid color scale", d3d11_backend_submit(presenter, &composite),
+        passed &= expect("invalid color scale", d3d_backend_submit(presenter, &composite),
             RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
         // Luminance tint: l = 0.298 + 0.588 * 0.502 = 0.593 times (1, 0.5, 0).
         const uint32_t tint_texel = 0xffff8000u;
@@ -1085,11 +1104,11 @@ static bool testBrightPass()
         mod.luminance_tint_factors[0] = 0x004c961du;
         mod.luminance_tint_factors[1] = 0xffff8000u;
         for (auto &vertex : trail_quad) vertex.x += 40;
-        passed &= expect("luminance tint draw", d3d11_backend_submit(presenter, &composite));
+        passed &= expect("luminance tint draw", d3d_backend_submit(presenter, &composite));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("bright present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy bright pass", d3d11_backend_destroy(&presenter));
+        passed &= expect("bright present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy bright pass", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // Gaussian red 0.8125 -> 107; linear 1.0 would give 203, a box filter 90.
             const unsigned pixels[][5] = {{40, 40, 107, 152, 0}, {42, 41, 107, 152, 0}, {43, 43, 0, 0, 0},
@@ -1121,11 +1140,11 @@ static bool testDistortion()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "dst", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create distortion", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create distortion", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("distortion clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("distortion clear", d3d_backend_submit(presenter, &clear));
         // Normal texel (255, 128, 128) is n = (1, 0, 0); ZERO_TO_ONE would give (1, 0.5, 0.5).
         const uint32_t normal = 0xffff8080u;
         const uint32_t scene[2] = {0xffff0000u, 0xff00ff00u};
@@ -1169,12 +1188,12 @@ static bool testDistortion()
             draw.reflection_byte_count = sizeof normal;
             draw.reflection_address_u = draw.reflection_address_v = 3;
             draw.distortion = true;
-            passed &= expect("distortion draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("distortion draw", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("distortion present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy distortion", d3d11_backend_destroy(&presenter));
+        passed &= expect("distortion present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy distortion", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             const unsigned xs[] = {50, 210};
             for (unsigned i = 0; i < 2; ++i) {
@@ -1203,11 +1222,11 @@ static bool testStageEffect()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "eff", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create stage effect", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create stage effect", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("effect clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("effect clear", d3d_backend_submit(presenter, &clear));
         const uint16_t indices[] = {0, 1, 2, 3};
         const uint32_t green = 0xff00ff00u;
         // Pass 2 is FUN_0027be10's kill-only mask over UV0 (FVF 0x144).
@@ -1254,7 +1273,7 @@ static bool testStageEffect()
             draw.modulate_texture_factor_alpha = true;
             draw.stage1_alpha_mask = draw.stage1_alpha_kill = true;
             draw.stage1_kill_only = pass == 2;
-            passed &= expect("masked overlay draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("masked overlay draw", d3d_backend_submit(presenter, &command));
         }
         // Eight texels, red then green; s / q = (x + 1) / 2 across the screen.
         uint32_t strip[8];
@@ -1298,7 +1317,7 @@ static bool testStageEffect()
         draw.directional.stage[0] = draw.directional.stage[2] = draw.directional.stage[3] = 1;
         draw.texture_factor = 0xffffffffu;
         draw.modulate_texture_factor_alpha = true;
-        passed &= expect("projected draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("projected draw", d3d_backend_submit(presenter, &command));
         // COUNT2 uses Q=1. Mesh UVs are zero; camera translation and z contribute to S.
         const World unprojected[] = {{0.375f, 0.75f, 0.5f, 0xff0000ffu, 0, 0},
             {0.875f, 0.75f, 0.5f, 0xff0000ffu, 0, 0},
@@ -1311,7 +1330,7 @@ static bool testStageEffect()
         draw.reflection_transform[12] = -1.75f;
         draw.reflection_transform[13] = 0.5f;
         draw.reflection_transform[14] = 1;
-        passed &= expect("unprojected position draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("unprojected position draw", d3d_backend_submit(presenter, &command));
         // FVF 0x102 has no diffuse stream: texture times factor in both channels.
         const float white_quad[4][5] = {{-0.875f,1.0f/3,0.5f,0,0}, {-0.625f,1.0f/3,0.5f,0,0},
             {-0.875f,1.0f/6,0.5f,0,0}, {-0.625f,1.0f/6,0.5f,0,0}};
@@ -1330,11 +1349,11 @@ static bool testStageEffect()
         draw.blend.blend_enable = true;
         draw.blend.src_factor = RECOMP_D3D_BLEND_SRC_ALPHA;
         draw.blend.dst_factor = RECOMP_D3D_BLEND_INV_SRC_ALPHA;
-        passed &= expect("white texture-factor draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("white texture-factor draw", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("effect present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy stage effect", d3d11_backend_destroy(&presenter));
+        passed &= expect("effect present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy stage effect", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // {x, y, R, G}: masked green at alpha 0.5 and 0.25, then 1.0 and killed, then
             // kill-only at factor alpha 0.5 and killed;
@@ -1369,11 +1388,11 @@ static bool testProgramMaxSlt()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "vps", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create program", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create program", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("program clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("program clear", d3d_backend_submit(presenter, &clear));
         const float vertices[4][6] = {{-1, 1, 0.5f, 0, 0, 0}, {1, 1, 0.5f, 0, 0, 0},
             {-1, -1, 0.5f, 0, 0, 0}, {1, -1, 0.5f, 0, 0, 0}};
         const uint16_t indices[] = {0, 1, 2, 3};
@@ -1411,7 +1430,7 @@ static bool testProgramMaxSlt()
         std::memcpy(draw.program_constants[1], c1, sizeof c1);
         std::memcpy(draw.program_constants[2], c2, sizeof c2);
         draw.program_constants[58][0] = draw.program_constants[58][1] = draw.program_constants[58][2] = 1;
-        passed &= expect("max/slt program draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("max/slt program draw", d3d_backend_submit(presenter, &command));
         // Position/color/UV (FVF 0x142): oD0 = v3 feeds MODULATE(TEXTURE, oD0) color;
         // alpha is texture times the factor's 0.5, ignoring oD0's 0.5 alpha.
         struct Colored { float x, y, z; uint32_t color; float u, v; };
@@ -1442,7 +1461,7 @@ static bool testProgramMaxSlt()
             color.program[i][2] = 2u << 26;
             color.program[i][3] = (15u << 12) | (movs[i][1] << 3) | 2048u | (i == 2 ? 1u : 0u);
         }
-        passed &= expect("color program draw", d3d11_backend_submit(presenter, &second));
+        passed &= expect("color program draw", d3d_backend_submit(presenter, &second));
         // Clamp U and wrap V independently: (1.25, 1.25) selects top-right green.
         const Colored addressed[] = {{0, 1, 0.5f, white, 1.25f, 1.25f}, {1, 1, 0.5f, white, 1.25f, 1.25f},
             {0, 0, 0.5f, white, 1.25f, 1.25f}, {1, 0, 0.5f, white, 1.25f, 1.25f}};
@@ -1457,7 +1476,7 @@ static bool testProgramMaxSlt()
         color.blend.blend_enable = false;
         color.directional.stage_mode = false;
         color.modulate_texture_factor_alpha = false;
-        passed &= expect("independent program addressing", d3d11_backend_submit(presenter, &second));
+        passed &= expect("independent program addressing", d3d_backend_submit(presenter, &second));
         // Kill tests sampled alpha, before a zero TFACTOR makes output alpha zero.
         for (unsigned q = 0; q < 2; ++q) {
             Colored quad[4];
@@ -1472,12 +1491,12 @@ static bool testProgramMaxSlt()
             color.texture_byte_count = sizeof texel;
             color.alpha_kill = color.modulate_texture_factor_alpha = true;
             color.texture_factor = 0x00ffffffu;
-            passed &= expect("program alpha kill", d3d11_backend_submit(presenter, &second));
+            passed &= expect("program alpha kill", d3d_backend_submit(presenter, &second));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("program present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy program", d3d11_backend_destroy(&presenter));
+        passed &= expect("program present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy program", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // MAX keeps the left half for the color program (red at half alpha);
             // SLT's (1, 1, 1, 1) samples the green texel.
@@ -1525,11 +1544,11 @@ static bool testProgramLitSge()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "vpl", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create lit", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create lit", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("lit clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("lit clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z; uint32_t color; float uv[8]; };
         const uint16_t indices[] = {0, 1, 2, 3};
         const uint32_t texels[2] = {0xffff0000u, 0xff00ff00u};
@@ -1581,12 +1600,12 @@ static bool testProgramLitSge()
             const float c3[4] = {0.5f, 0.5f, 0.5f, 0.5f};
             std::memcpy(draw.program_constants[3], c3, sizeof c3);
             draw.program_constants[58][0] = draw.program_constants[58][1] = draw.program_constants[58][2] = 1;
-            passed &= expect("lit program draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("lit program draw", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("lit present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy lit", d3d11_backend_destroy(&presenter));
+        passed &= expect("lit present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy lit", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             const unsigned xs[] = {80, 240};
             for (unsigned i = 0; i < 2; ++i) {
@@ -1616,11 +1635,11 @@ static bool testStageBump()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "bmp", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create bump", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create bump", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("bump clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("bump clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z; uint32_t color; float uv[8]; };
         const uint16_t indices[] = {0, 1, 2, 3};
         const uint32_t scene[2] = {0xffff0000u, 0xff00ff00u}, mask = 0x80ffffffu;
@@ -1682,12 +1701,12 @@ static bool testStageBump()
             }
             draw.program_constants[5][0] = 0.25f;
             draw.program_constants[58][0] = draw.program_constants[58][1] = draw.program_constants[58][2] = 1;
-            passed &= expect("bump draw", d3d11_backend_submit(presenter, &command));
+            passed &= expect("bump draw", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("bump present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy bump", d3d11_backend_destroy(&presenter));
+        passed &= expect("bump present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy bump", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // 1 - (128/255)^4 keeps 239 of 255; fog 0.25 leaves 60 green and 191 blue.
             const unsigned xs[] = {80, 240}, blue[] = {0, 191}, green[] = {239, 60};
@@ -1718,11 +1737,11 @@ static bool testStageWater()
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "wtr", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create water", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create water", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("water clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("water clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z; uint32_t color; float uv[8]; };
         const uint16_t indices[] = {0, 1, 2, 3};
         // Opaque red at u = 0.25; half-alpha green where the +64 U offset lands.
@@ -1779,11 +1798,11 @@ static bool testStageWater()
         }
         draw.program_constants[6][0] = 0.5f;
         draw.program_constants[58][0] = draw.program_constants[58][1] = draw.program_constants[58][2] = 1;
-        passed &= expect("water draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("water draw", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("water present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("destroy water", d3d11_backend_destroy(&presenter));
+        passed &= expect("water present", d3d_backend_submit(presenter, &present));
+        passed &= expect("destroy water", d3d_backend_destroy(&presenter));
         if (FILE *file = std::fopen(path, "rb")) {
             // s = 1, t1 = green at 0.502 alpha, t3.a = 0.502: r0 = (0.25, 0.5, 0).
             unsigned char bgr[3]{};
@@ -1805,6 +1824,23 @@ static bool testClose(bool idle)
 {
     RecompD3dPresenter *presenter = nullptr;
     if (!expect("create close", recomp_d3d_presenter_create(&config, &presenter))) return false;
+#ifndef _WIN32
+    /* SDL delivers a close to the presenter's own thread at its next present. */
+    SDL_Event quit{};
+    quit.type = SDL_EVENT_QUIT;
+    bool passed = SDL_PushEvent(&quit);
+    RecompD3dPresenterError error = RECOMP_D3D_PRESENTER_OK;
+    uint32_t ticks = 0;
+    while (passed && error == RECOMP_D3D_PRESENTER_OK && ticks < 600) {
+        error = tick(presenter, ++ticks);
+    }
+    passed &= expect("close status", error, RECOMP_D3D_PRESENTER_CLOSED);
+    passed &= expect("sticky close", recomp_d3d_presenter_submit(presenter, nullptr),
+        RECOMP_D3D_PRESENTER_CLOSED);
+    passed &= destroy(presenter);
+    if (passed) std::printf("PASS %s close ticks=%u\n", idle ? "idle" : "queued", ticks);
+    return passed;
+#else
     const HWND window = presenterWindow();
     bool passed = window != nullptr;
     DWORD owner = GetWindowThreadProcessId(window, nullptr);
@@ -1828,6 +1864,7 @@ static bool testClose(bool idle)
     else std::fprintf(stderr, "FAIL close idle=%d window=%p owner=%lu\n", idle,
         static_cast<void *>(window), owner);
     return passed;
+#endif
 }
 
 // A far quad behind a near quad covering the left half counts only the right half.
@@ -1886,10 +1923,16 @@ static bool testVisibility()
         passed &= complete;
     }
     passed &= pixels[0] == 160u * 240u && pixels[1] == 320u * 240u;
+#ifdef _WIN32
     // An END the worker cannot match to a BEGIN fails the presenter.
     passed &= expect("unbegun end", recomp_d3d_presenter_submit(presenter, &end));
     passed &= expect("unbegun end fails", recomp_d3d_presenter_flush(presenter, true),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
+#else
+    // The inline presenter rejects an END without a BEGIN when it is submitted.
+    passed &= expect("unbegun end", recomp_d3d_presenter_submit(presenter, &end),
+        RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
+#endif
     recomp_d3d_presenter_destroy(&presenter);
     if (passed) std::puts("PASS occlusion counts partially hidden and unoccluded quads");
     else std::fprintf(stderr, "FAIL visibility complete=%d pixels=%u,%u\n", complete, pixels[0], pixels[1]);
@@ -1902,10 +1945,10 @@ static bool testVolume(bool camera_position = false)
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "vol", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create volume", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create volume", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
-        passed &= expect("volume clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("volume clear", d3d_backend_submit(presenter, &clear));
         // Independent 2x1x2 Morton fixture: red/blue, then green/yellow.
         const uint32_t texels[] = {0xffff0000u, 0xff0000ffu, 0xff00ff00u, 0xffffff00u};
         const uint16_t indices[] = {0, 1, 2, 3};
@@ -1954,13 +1997,13 @@ static bool testVolume(bool camera_position = false)
                 draw.reflection_transform[12] = pass == 5 ? 0.75f : 0.25f;
                 draw.reflection_transform[13] = 0.5f;
             }
-            passed &= expect("volume sample", d3d11_backend_submit(presenter, &command));
+            passed &= expect("volume sample", d3d_backend_submit(presenter, &command));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("volume present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("volume present", d3d_backend_submit(presenter, &present));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     if (passed) {
         FILE *file = std::fopen(path, "rb");
         if (file) {
@@ -1992,11 +2035,11 @@ static bool testFrameBufferBlend()
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     _putenv_s("RECOMP_D3D_FRAME_DUMP_AT", "2");
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create frame blend", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create frame blend", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xffff0000u;
-        passed &= expect("red first frame", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("red first frame", d3d_backend_submit(presenter, &clear));
         const uint16_t indices[] = {0,1,2,3};
         const float quad[4][7] = {{0,0,0,1,0,0,0}, {320,0,0,1,0,320,0},
             {0,240,0,1,0,0,240}, {320,240,0,1,0,320,240}};
@@ -2018,21 +2061,21 @@ static bool testFrameBufferBlend()
         draw.address_u = draw.address_v = 3;
         draw.directional.stage_mode = true;
         draw.directional.stage[0] = draw.directional.stage[3] = 1;
-        passed &= expect("prime previous copy", d3d11_backend_submit(presenter, &command));
+        passed &= expect("prime previous copy", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5,1};
-        passed &= expect("first frame present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("first frame present", d3d_backend_submit(presenter, &present));
         clear.data.clear.color = 0xff0000ffu;
-        passed &= expect("blue current frame", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("blue current frame", d3d_backend_submit(presenter, &clear));
         draw.blend.blend_enable = true;
         draw.blend.src_factor = RECOMP_D3D_BLEND_CONSTANT_ALPHA;
         draw.blend.dst_factor = RECOMP_D3D_BLEND_INV_CONSTANT_ALPHA;
         draw.blend.op = RECOMP_D3D_BLEND_OP_ADD;
         draw.blend.constant_color = 0x80ff0000u;
-        passed &= expect("previous frame constant alpha", d3d11_backend_submit(presenter, &command));
-        passed &= expect("blended frame present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("previous frame constant alpha", d3d_backend_submit(presenter, &command));
+        passed &= expect("blended frame present", d3d_backend_submit(presenter, &present));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     if (passed) {
         FILE *file = std::fopen(path, "rb");
         unsigned char bgr[3]{};
@@ -2060,11 +2103,11 @@ static bool testDepthBias(bool scaled = false)
     RecompD3dPresenter *presenter = nullptr;
     auto bias_config = config;
     if (scaled) bias_config.width = 360; // Scaled 4:3 output has unequal X/Y ratios.
-    bool passed = expect("create depth bias", d3d11_backend_create(&bias_config, &presenter));
+    bool passed = expect("create depth bias", d3d_backend_create(&bias_config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff808080u;
-        passed &= expect("bias clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("bias clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z, rhw; uint32_t color; };
         const uint16_t indices[] = {0, 1, 2, 3};
         RecompD3dPresenterCommand command{};
@@ -2092,7 +2135,7 @@ static bool testDepthBias(bool scaled = false)
             draw.vertex_bytes = vertices;
             draw.depth_bias = 0;
             draw.slope_scaled_depth_bias = 0;
-            passed &= expect("unbiased floor", d3d11_backend_submit(presenter, &command));
+            passed &= expect("unbiased floor", d3d_backend_submit(presenter, &command));
             for (auto &vertex : vertices) {
                 vertex.color = 0xff000000u;
                 if (tilted) vertex.z += 0.0002f;
@@ -2102,15 +2145,15 @@ static bool testDepthBias(bool scaled = false)
             draw.slope_scaled_depth_bias = slope[i];
             draw.depth.depth_write_enable = false;
             draw.depth.depth_func = RECOMP_D3D_COMPARE_LESS;
-            passed &= expect("coplanar receiver", d3d11_backend_submit(presenter, &command));
+            passed &= expect("coplanar receiver", d3d_backend_submit(presenter, &command));
             draw.depth.depth_write_enable = true;
             draw.depth.depth_func = RECOMP_D3D_COMPARE_LESS_EQUAL;
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("bias present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("bias present", d3d_backend_submit(presenter, &present));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     if (passed) {
         FILE *file = std::fopen(path, "rb");
         if (!file) passed = false;
@@ -2150,23 +2193,23 @@ static bool testCard()
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
     _putenv_s("RECOMP_D3D_SCALE", "1");
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create card", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create card", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("card clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("card clear", d3d_backend_submit(presenter, &clear));
         std::vector<uint32_t> pixels(16 * 9, 0xff4080c0u);
         RecompD3dCardVertex vertices[4];
         RecompD3dPresenterCommand command{RECOMP_D3D_PRESENTER_COMMAND_DRAW};
         // A 16:9 card on a 4:3 display fills 3/4 of the height: rows 30..209.
         recomp_d3d_card_draw(pixels.data(), 16, 9, 320.0f, 240.0f, 4.0f / 3.0f, 128,
             vertices, &command.data.draw);
-        passed &= expect("card draw", d3d11_backend_submit(presenter, &command));
+        passed &= expect("card draw", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("card present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("card present", d3d_backend_submit(presenter, &present));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     FILE *file = passed ? std::fopen(path, "rb") : nullptr;
     passed &= file != nullptr;
     const struct { int y; unsigned b, g, r; } probes[] = {{10, 0, 0, 0}, {120, 96, 64, 32}, {229, 0, 0, 0}};
@@ -2200,11 +2243,11 @@ static bool testScaledMsaaDepthBias()
     auto bias_config = config;
     bias_config.width = 360; // Host 640x480: unequal X/Y scale, integer panel spacing.
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create scaled MSAA bias", d3d11_backend_create(&bias_config, &presenter));
+    bool passed = expect("create scaled MSAA bias", d3d_backend_create(&bias_config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xffffffffu;
-        passed &= expect("MSAA bias clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("MSAA bias clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z, rhw; uint32_t color; };
         const uint16_t indices[] = {0, 1, 2, 3};
         RecompD3dPresenterCommand command{};
@@ -2236,7 +2279,7 @@ static bool testScaledMsaaDepthBias()
                 draw.depth.alpha_test_enable = false;
                 draw.depth_bias = 0;
                 draw.slope_scaled_depth_bias = 0;
-                passed &= expect("MSAA flat floor", d3d11_backend_submit(presenter, &command));
+                passed &= expect("MSAA flat floor", d3d_backend_submit(presenter, &command));
                 for (auto &vertex : vertices) {
                     vertex.z += slope * (vertex.y - (top + 40.25f));
                     if (panel) vertex.z -= factor * std::abs(slope);
@@ -2250,14 +2293,14 @@ static bool testScaledMsaaDepthBias()
                 draw.depth.alpha_func = RECOMP_D3D_COMPARE_GREATER;
                 draw.depth.alpha_ref = 128;
                 draw.material_alpha_mode = RECOMP_D3D_MATERIAL_ALPHA_SELECT_VERTEX_DIFFUSE;
-                passed &= expect("MSAA intersecting receiver", d3d11_backend_submit(presenter, &command));
+                passed &= expect("MSAA intersecting receiver", d3d_backend_submit(presenter, &command));
             }
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5, 1};
-        passed &= expect("MSAA bias present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("MSAA bias present", d3d_backend_submit(presenter, &present));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     if (passed) {
         FILE *file = std::fopen(path, "rb");
         if (!file) passed = false;
@@ -2310,7 +2353,7 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     _putenv_s("RECOMP_D3D_SCALE", scaled_msaa ? "2" : "1");
     _putenv_s("RECOMP_D3D_MSAA", scaled_msaa ? "4" : "1");
     RecompD3dPresenter *presenter = nullptr;
-    if (!expect("create coverage", d3d11_backend_create(&config, &presenter))) return false;
+    if (!expect("create coverage", d3d_backend_create(&config, &presenter))) return false;
     struct Vertex { float x, y, z, nx, ny, nz, u, v; };
     Vertex vertices[] = {{-1,-1,0.5f}, {1,-1,0.5f}, {0,1,0.5f}};
     for (auto &vertex : vertices) vertex.nx = vertex.u = NAN;
@@ -2339,10 +2382,10 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     clear.data.clear.z = 0.25f;
     clear.data.clear.clear_stencil = true;
     clear.data.clear.stencil = 7u;
-    bool passed = expect("coverage clear", d3d11_backend_submit(presenter, &clear));
+    bool passed = expect("coverage clear", d3d_backend_submit(presenter, &clear));
     const auto coverage = [&](const char *label, bool expected) {
         bool covered = !expected;
-        const auto error = d3d11_backend_draw_coverage(presenter, &draw, &covered);
+        const auto error = d3d_backend_draw_coverage(presenter, &draw, &covered);
         const bool ok = expect(label, error) && covered == expected;
         if (!ok) std::fprintf(stderr, "FAIL %s covered=%d expected=%d\n", label, covered, expected);
         passed &= ok;
@@ -2394,9 +2437,9 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     draw.screen_space_offset[0] = 0;
     draw.cull_mode = RECOMP_D3D_CULL_CLOCKWISE;
     bool clockwise = false, counterclockwise = false;
-    passed &= expect("clockwise coverage", d3d11_backend_draw_coverage(presenter, &draw, &clockwise));
+    passed &= expect("clockwise coverage", d3d_backend_draw_coverage(presenter, &draw, &clockwise));
     draw.cull_mode = RECOMP_D3D_CULL_COUNTER_CLOCKWISE;
-    passed &= expect("counterclockwise coverage", d3d11_backend_draw_coverage(presenter, &draw, &counterclockwise));
+    passed &= expect("counterclockwise coverage", d3d_backend_draw_coverage(presenter, &draw, &counterclockwise));
     if (clockwise == counterclockwise) { std::fprintf(stderr, "FAIL coverage ignored culling\n"); passed = false; }
     draw.cull_mode = RECOMP_D3D_CULL_NONE;
     {
@@ -2454,20 +2497,20 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     draw.transform[0] = draw.transform[10] = 1;
     draw.target = {};
     bool covered = false;
-    passed &= expect("uninitialized coverage", d3d11_backend_draw_coverage(nullptr, &draw, &covered),
+    passed &= expect("uninitialized coverage", d3d_backend_draw_coverage(nullptr, &draw, &covered),
         RECOMP_D3D_PRESENTER_NOT_INITIALIZED);
     passed &= covered;
-    passed &= expect("null coverage draw", d3d11_backend_draw_coverage(presenter, nullptr, &covered),
+    passed &= expect("null coverage draw", d3d_backend_draw_coverage(presenter, nullptr, &covered),
         RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     passed &= covered;
-    passed &= expect("null coverage result", d3d11_backend_draw_coverage(presenter, &draw, nullptr),
+    passed &= expect("null coverage result", d3d_backend_draw_coverage(presenter, &draw, nullptr),
         RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     draw.index_bytes = reinterpret_cast<const void *>(1u);
     draw.index_count = 64u * 1024u * 1024u / sizeof(uint16_t) + 1u;
     draw.triangle_count = draw.index_count / 3u;
     covered = false;
     passed &= expect("oversized coverage indices rejected before read",
-        d3d11_backend_draw_coverage(presenter, &draw, &covered), RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
+        d3d_backend_draw_coverage(presenter, &draw, &covered), RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     passed &= covered;
     draw.index_bytes = indices;
     draw.index_count = 3u;
@@ -2476,29 +2519,29 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     draw.vertex_stride = UINT32_MAX / draw.vertex_count;
     covered = false;
     passed &= expect("oversized coverage vertices rejected before read",
-        d3d11_backend_draw_coverage(presenter, &draw, &covered), RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
+        d3d_backend_draw_coverage(presenter, &draw, &covered), RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     passed &= covered;
     draw.vertex_bytes = vertices;
     draw.vertex_stride = sizeof(Vertex);
     draw.program_count = 1u;
-    passed &= expect("program coverage rejected", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("program coverage rejected", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
     draw.program_count = 0u;
     draw.fvf = 0x144u;
-    passed &= expect("pretransformed coverage rejected", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("pretransformed coverage rejected", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
     draw.fvf = 0x112u;
     draw.primitive_type = 2u;
-    passed &= expect("line coverage rejected", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("line coverage rejected", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
     draw.primitive_type = 5u;
     std::thread other([&] {
-        passed &= expect("coverage owner thread", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+        passed &= expect("coverage owner thread", d3d_backend_draw_coverage(presenter, &draw, &covered),
             RECOMP_D3D_PRESENTER_WRONG_THREAD);
     });
     other.join();
     vertices[0].x = NAN;
-    passed &= expect("nonfinite coverage position", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("nonfinite coverage position", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_INVALID_ARGUMENT);
     passed &= covered;
     vertices[0].x = -1;
@@ -2506,22 +2549,22 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     draw.has_scissor = true;
     draw.scissor[0] = 2;
     draw.scissor[2] = 1;
-    passed &= expect("invalid coverage scissor", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("invalid coverage scissor", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
     passed &= covered;
     draw.has_scissor = false;
     RecompD3dPresenterCommand begin{RECOMP_D3D_PRESENTER_COMMAND_VISIBILITY_BEGIN};
     RecompD3dPresenterCommand end{RECOMP_D3D_PRESENTER_COMMAND_VISIBILITY_END};
     end.data.visibility_index = 17u;
-    passed &= expect("guest visibility begin", d3d11_backend_submit(presenter, &begin));
-    passed &= expect("open guest visibility rejects probe", d3d11_backend_draw_coverage(presenter, &draw, &covered),
+    passed &= expect("guest visibility begin", d3d_backend_submit(presenter, &begin));
+    passed &= expect("open guest visibility rejects probe", d3d_backend_draw_coverage(presenter, &draw, &covered),
         RECOMP_D3D_PRESENTER_UNSUPPORTED_COMMAND);
     passed &= covered;
-    passed &= expect("guest visibility end", d3d11_backend_submit(presenter, &end));
+    passed &= expect("guest visibility end", d3d_backend_submit(presenter, &end));
     coverage("coverage after query error", true);
     uint32_t query_index = 0u, pixels = ~0u;
-    const auto poll = d3d11_backend_poll_visibility(presenter, &query_index, &pixels);
-    if (poll != D3D11_VISIBILITY_READY || query_index != 17u || pixels != 0u) {
+    const auto poll = d3d_backend_poll_visibility(presenter, &query_index, &pixels);
+    if (poll != D3D_BACKEND_VISIBILITY_READY || query_index != 17u || pixels != 0u) {
         std::fprintf(stderr, "FAIL coverage changed guest visibility poll=%u pixels=%u\n", poll, pixels);
         passed = false;
     }
@@ -2546,11 +2589,11 @@ static bool testDrawCoverage(bool scaled_msaa = false)
     check.depth.depth_func = check.depth.stencil_func = RECOMP_D3D_COMPARE_EQUAL;
     check.depth.stencil_ref = 7u;
     check.depth.stencil_read_mask = 255u;
-    passed &= expect("depth stencil preservation witness", d3d11_backend_submit(presenter, &paint));
+    passed &= expect("depth stencil preservation witness", d3d_backend_submit(presenter, &paint));
     RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
     present.data.present = {5,1};
-    passed &= expect("coverage present", d3d11_backend_submit(presenter, &present));
-    passed &= expect("destroy coverage", d3d11_backend_destroy(&presenter));
+    passed &= expect("coverage present", d3d_backend_submit(presenter, &present));
+    passed &= expect("destroy coverage", d3d_backend_destroy(&presenter));
     if (FILE *file = std::fopen(path, "rb")) {
         uint32_t width = 0u, height = 0u;
         std::fseek(file, 18, SEEK_SET);
@@ -2578,6 +2621,10 @@ static bool testDrawCoverage(bool scaled_msaa = false)
 
 static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 480u, unsigned samples = 4u)
 {
+#ifndef _WIN32
+    // SMAA is a Direct3D 11 pass; the SDL_GPU presenter offers MSAA only.
+    if (smaa) return true;
+#endif
     char folder[MAX_PATH], path[MAX_PATH];
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "aa", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);
@@ -2586,11 +2633,11 @@ static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 4
     _putenv_s("RECOMP_D3D_MSAA", msaa ? std::to_string(samples).c_str() : "1");
     _putenv_s("RECOMP_D3D_SMAA", smaa ? "1" : "0");
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create widescreen AA", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create widescreen AA", d3d_backend_create(&config, &presenter));
     if (passed) {
         auto clear = clearCommand();
         clear.data.clear.color = 0xff000000u;
-        passed &= expect("AA clear", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("AA clear", d3d_backend_submit(presenter, &clear));
         struct Vertex { float x, y, z, rhw; uint32_t color; };
         const Vertex occluder[] = {{0,0,0.25f,1,0}, {160,0,0.25f,1,0},
             {0,240,0.25f,1,0}, {160,240,0.25f,1,0}};
@@ -2606,7 +2653,7 @@ static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 4
         draw.index_bytes = indices;
         draw.depth.depth_test_enable = draw.depth.depth_write_enable = true;
         draw.depth.depth_func = RECOMP_D3D_COMPARE_LESS;
-        passed &= expect("AA main occluder", d3d11_backend_submit(presenter, &command));
+        passed &= expect("AA main occluder", d3d_backend_submit(presenter, &command));
         RecompD3dPresenterTarget target{};
         target.offscreen = true;
         target.color.data = 0x10000u;
@@ -2616,7 +2663,7 @@ static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 4
         target.color.linear = true;
         clear.data.clear.target = target;
         clear.data.clear.clear_depth = false;
-        passed &= expect("AA offscreen color clear keeps depth", d3d11_backend_submit(presenter, &clear));
+        passed &= expect("AA offscreen color clear keeps depth", d3d_backend_submit(presenter, &clear));
         const Vertex triangle[] = {{20,20,0.5f,1,0xffffffffu}, {300,20,0.5f,1,0xffffffffu},
             {300,220,0.5f,1,0xffffffffu}};
         draw.vertex_bytes = triangle;
@@ -2626,7 +2673,7 @@ static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 4
         draw.depth.depth_write_enable = false;
         draw.blend.color_write_mask = 15u;
         draw.target = target;
-        passed &= expect("AA offscreen triangle shares main depth", d3d11_backend_submit(presenter, &command));
+        passed &= expect("AA offscreen triangle shares main depth", d3d_backend_submit(presenter, &command));
         const float quad[4][7] = {{0,0,0,1,0,0,0}, {320,0,0,1,0,320,0},
             {0,240,0,1,0,0,240}, {320,240,0,1,0,320,240}};
         draw = {};
@@ -2643,23 +2690,25 @@ static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 4
         draw.address_u = draw.address_v = 3u;
         draw.directional.stage_mode = true;
         draw.directional.stage[0] = draw.directional.stage[3] = 1u;
-        passed &= expect("AA resolved offscreen composite", d3d11_backend_submit(presenter, &command));
+        passed &= expect("AA resolved offscreen composite", d3d_backend_submit(presenter, &command));
         if (smaa && msaa) {
             RecompD3dPresenterCommand gamma{RECOMP_D3D_PRESENTER_COMMAND_GAMMA};
             for (auto &channel : gamma.data.gamma)
                 for (unsigned i = 0u; i < 256u; ++i) channel[i] = static_cast<uint8_t>((i * i + 127u) / 255u);
-            passed &= expect("AA with gamma", d3d11_backend_submit(presenter, &gamma));
+            passed &= expect("AA with gamma", d3d_backend_submit(presenter, &gamma));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5u,1u};
-        passed &= expect("AA present", d3d11_backend_submit(presenter, &present));
+        passed &= expect("AA present", d3d_backend_submit(presenter, &present));
+#ifdef _WIN32
         RECT rect{};
         const unsigned client_height = (std::min)(height, static_cast<unsigned>(GetSystemMetrics(SM_CYSCREEN)));
         passed &= GetClientRect(presenterWindow(), &rect) &&
             rect.right == (client_height * 16u + 8u) / 9u && rect.bottom == client_height;
-        passed &= expect("AA target release", d3d11_backend_release_memory(presenter, 0x10000u, 4096u, true));
+#endif
+        passed &= expect("AA target release", d3d_backend_release_memory(presenter, 0x10000u, 4096u, true));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     unsigned partial = 0u, changed = 0u;
     static std::vector<unsigned char> baseline;
     if (FILE *file = std::fopen(path, "rb")) {
@@ -2738,7 +2787,7 @@ static bool testResampledMsaaTarget()
     _putenv_s("RECOMP_D3D_SCALE", "2");
     _putenv_s("RECOMP_D3D_MSAA", "4");
     RecompD3dPresenter *presenter = nullptr;
-    bool passed = expect("create resampled target", d3d11_backend_create(&config, &presenter));
+    bool passed = expect("create resampled target", d3d_backend_create(&config, &presenter));
     if (passed) {
         RecompD3dPresenterTarget target{};
         target.offscreen = true;
@@ -2770,15 +2819,15 @@ static bool testResampledMsaaTarget()
             clear.data.clear.target = target;
             clear.data.clear.clear_depth = false;
             clear.data.clear.color = color;
-            passed &= expect("resampled target clear", d3d11_backend_submit(presenter, &clear));
-            passed &= expect("resampled target composite", d3d11_backend_submit(presenter, &composite));
+            passed &= expect("resampled target clear", d3d_backend_submit(presenter, &clear));
+            passed &= expect("resampled target composite", d3d_backend_submit(presenter, &composite));
         }
         RecompD3dPresenterCommand present{RECOMP_D3D_PRESENTER_COMMAND_PRESENT};
         present.data.present = {5u, 1u};
-        passed &= expect("resampled present", d3d11_backend_submit(presenter, &present));
-        passed &= expect("resampled release", d3d11_backend_release_memory(presenter, 0x10000u, 4096u, true));
+        passed &= expect("resampled present", d3d_backend_submit(presenter, &present));
+        passed &= expect("resampled release", d3d_backend_release_memory(presenter, 0x10000u, 4096u, true));
     }
-    d3d11_backend_destroy(&presenter);
+    d3d_backend_destroy(&presenter);
     unsigned char bgr[3]{};
     if (FILE *file = std::fopen(path, "rb")) {
         std::fseek(file, 54 + 239 * 1920 + 320 * 3, SEEK_SET);

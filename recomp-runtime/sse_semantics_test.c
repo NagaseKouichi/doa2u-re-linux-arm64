@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <xmmintrin.h>
 
 #include "recomp_types.h"
 
@@ -302,12 +301,15 @@ int recomp_sse_semantics_test(void)
         value = MMX_FROM_PS(NAN, INFINITY, 0);
         passed &= expect_u32("cvtps2pi integer indefinite", value.q ==
             UINT64_C(0x8000000080000000), 1u);
+#if RECOMP_HOST_X86
+        /* Portable hosts round to nearest; only x86 follows a changed MXCSR. */
         unsigned control = _mm_getcsr();
         _MM_SET_ROUNDING_MODE(_MM_ROUND_DOWN);
         value = MMX_FROM_PS(-1.2f, 2.9f, 0);
         _mm_setcsr(control);
         passed &= expect_u32("cvtps2pi MXCSR rounding", value.ud[0], 0xfffffffeu);
         passed &= expect_u32("cvtps2pi MXCSR second lane", value.ud[1], 2u);
+#endif
     }
 
     {

@@ -8,11 +8,20 @@
 
 #include <math.h>
 #include <string.h>
+/* Tests define RECOMP_HOST_X86=0 on x86 to check the portable lane code. */
+#ifndef RECOMP_HOST_X86
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#define RECOMP_HOST_X86 1
+#else
+#define RECOMP_HOST_X86 0
+#endif
+#endif
+#if RECOMP_HOST_X86
 #include <xmmintrin.h>
 #include <emmintrin.h>
-
 #if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 #endif
 
 static inline uint32_t BSWAP32(uint32_t value)
@@ -297,11 +306,13 @@ static inline int recomp_parity8(uint32_t x)
 #define MEMD(address) \
     (*(double *)(void *)recomp_memory_u64((uint32_t)(address)))
 #define XBOX_PTR(address) ((void *)(uintptr_t)(uint32_t)(address))
+#undef memcpy
 #define memcpy(destination, source, size) \
     recomp_guest_memcpy( \
         (uint32_t)(uintptr_t)(destination), \
         (uint32_t)(uintptr_t)(source), \
         (size_t)(size))
+#undef memset
 #define memset(destination, value, size) \
     recomp_guest_memset( \
         (uint32_t)(uintptr_t)(destination), \
@@ -600,6 +611,7 @@ static inline RecompXmm XMM_CMP_PRED(RecompXmm a, RecompXmm b, int predicate)
 
 /* SHUFPS takes the low half from the destination and the high half from the
    source. It is the broadcast in every matrix concatenation. */
+#if RECOMP_HOST_X86
 static inline RecompXmm recomp_xmm_from_native(__m128 value)
 {
     RecompXmm r;
@@ -612,6 +624,20 @@ static inline RecompXmm recomp_xmm_from_native(__m128 value)
 #define XMM_SHUFFLE(a, b, imm) \
     recomp_xmm_from_native(_mm_shuffle_ps( \
         _mm_loadu_ps((a).f), _mm_loadu_ps((b).f), (imm)))
+#else
+static inline RecompXmm recomp_xmm_shuffle(RecompXmm a, RecompXmm b, unsigned imm)
+{
+    RecompXmm r;
+
+    r.u[0] = a.u[imm & 3u];
+    r.u[1] = a.u[(imm >> 2) & 3u];
+    r.u[2] = b.u[(imm >> 4) & 3u];
+    r.u[3] = b.u[(imm >> 6) & 3u];
+    return r;
+}
+
+#define XMM_SHUFFLE(a, b, imm) recomp_xmm_shuffle((a), (b), (unsigned)(imm))
+#endif
 
 static inline RecompXmm XMM_UNPACK_LOW(RecompXmm a, RecompXmm b)
 {
@@ -661,6 +687,7 @@ static inline uint32_t XMM_MOVEMASK(RecompXmm a)
            ((a.u[2] >> 29) & 4u) | ((a.u[3] >> 28) & 8u);
 }
 
+#if RECOMP_HOST_X86
 /* RCPSS/RSQRTSS are table approximations; the host instruction gives the
    guest's bits on Intel, where exact division would not. */
 static inline float recomp_rcpss(float x)
@@ -680,6 +707,27 @@ static inline int32_t MMX_CVT_F2I(float v, int truncate)
     return truncate ? _mm_cvttss_si32(_mm_set_ss(v))
                     : _mm_cvtss_si32(_mm_set_ss(v));
 }
+#else
+/* ponytail: non-x86 hosts have no RCPSS/RSQRTSS table; the exact quotient
+   is within Intel's documented 1.5 * 2^-12 error but not bit-identical. */
+static inline float recomp_rcpss(float x)
+{
+    return 1.0f / x;
+}
+
+static inline float recomp_rsqrtss(float x)
+{
+    return 1.0f / sqrtf(x);
+}
+
+static inline int32_t MMX_CVT_F2I(float v, int truncate)
+{
+    /* The default MXCSR rounds to nearest even, as lrintf does under the
+       host default rounding mode. */
+    if (!(v >= -2147483648.0f && v < 2147483648.0f)) return INT32_MIN;
+    return truncate ? (int32_t)v : (int32_t)lrintf(v);
+}
+#endif
 
 /* ── MMX ────────────────────────────────────────────────────────────────
    The register file lives in runtime.h. Use SSE2's low 64 bits so packed
@@ -704,6 +752,7 @@ static inline RecompMmx MMX_MEM(uint32_t address)
 #define MMX_STORE(address, reg) \
     (*recomp_memory_u64((uint32_t)(address)) = (reg).q)
 
+#if RECOMP_HOST_X86
 static inline __m128i recomp_mmx_vector(RecompMmx value)
 {
     return _mm_cvtsi64_si128((int64_t)value.q);
@@ -797,6 +846,162 @@ static inline RecompMmx MMX_PACKSSDW(RecompMmx a, RecompMmx b)
         _mm_setzero_si128()));
 }
 
+#else
+static inline int8_t recomp_saturate_i8(int32_t v)
+{
+    return (int8_t)(v < -128 ? -128 : v > 127 ? 127 : v);
+}
+
+static inline int16_t recomp_saturate_i16(int32_t v)
+{
+    return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+}
+
+static inline uint8_t recomp_saturate_u8(int32_t v)
+{
+    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+
+#define RECOMP_MMX_LANES(name, field, count, expr) \
+    static inline RecompMmx name(RecompMmx a, RecompMmx b) \
+    { \
+        RecompMmx r; \
+        for (int i = 0; i < (count); ++i) r.field[i] = (expr); \
+        return r; \
+    }
+
+RECOMP_MMX_LANES(MMX_PADDW, uw, 4, (uint16_t)(a.uw[i] + b.uw[i]))
+RECOMP_MMX_LANES(MMX_PSUBW, uw, 4, (uint16_t)(a.uw[i] - b.uw[i]))
+RECOMP_MMX_LANES(MMX_PMULLW, uw, 4, (uint16_t)((int32_t)a.w[i] * b.w[i]))
+RECOMP_MMX_LANES(MMX_PMULHW, w, 4, (int16_t)(((int32_t)a.w[i] * b.w[i]) >> 16))
+RECOMP_MMX_LANES(MMX_PAVGB, ub, 8, (uint8_t)(((unsigned)a.ub[i] + b.ub[i] + 1u) >> 1))
+RECOMP_MMX_LANES(MMX_PADDD, ud, 2, a.ud[i] + b.ud[i])
+RECOMP_MMX_LANES(MMX_PSUBD, ud, 2, a.ud[i] - b.ud[i])
+RECOMP_MMX_LANES(MMX_PADDUSW, uw, 4,
+    (uint16_t)((uint32_t)a.uw[i] + b.uw[i] > 0xffffu ? 0xffffu : a.uw[i] + b.uw[i]))
+RECOMP_MMX_LANES(MMX_PAVGW, uw, 4, (uint16_t)(((uint32_t)a.uw[i] + b.uw[i] + 1u) >> 1))
+RECOMP_MMX_LANES(MMX_PMINSW, w, 4, a.w[i] < b.w[i] ? a.w[i] : b.w[i])
+RECOMP_MMX_LANES(MMX_PCMPEQD, ud, 2, a.ud[i] == b.ud[i] ? 0xffffffffu : 0u)
+/* 0x8000 * 0x8000 twice wraps to 0x80000000, as on hardware. */
+RECOMP_MMX_LANES(MMX_PMADDWD, ud, 2,
+    (uint32_t)((int32_t)a.w[2 * i] * b.w[2 * i]) + (uint32_t)((int32_t)a.w[2 * i + 1] * b.w[2 * i + 1]))
+
+static inline RecompMmx MMX_PAND(RecompMmx a, RecompMmx b)
+{
+    a.q &= b.q;
+    return a;
+}
+
+static inline RecompMmx MMX_POR(RecompMmx a, RecompMmx b)
+{
+    a.q |= b.q;
+    return a;
+}
+
+static inline RecompMmx MMX_PXOR(RecompMmx a, RecompMmx b)
+{
+    a.q ^= b.q;
+    return a;
+}
+
+/* Interleave the low (half = 0) or high (half = 1) lanes of a and b. */
+#define RECOMP_MMX_UNPACK(name, field, count, half) \
+    static inline RecompMmx name(RecompMmx a, RecompMmx b) \
+    { \
+        RecompMmx r; \
+        for (int i = 0; i < (count) / 2; ++i) { \
+            r.field[2 * i] = a.field[i + (half) * (count) / 2]; \
+            r.field[2 * i + 1] = b.field[i + (half) * (count) / 2]; \
+        } \
+        return r; \
+    }
+
+RECOMP_MMX_UNPACK(MMX_PUNPCKLBW, ub, 8, 0)
+RECOMP_MMX_UNPACK(MMX_PUNPCKLWD, uw, 4, 0)
+RECOMP_MMX_UNPACK(MMX_PUNPCKLDQ, ud, 2, 0)
+RECOMP_MMX_UNPACK(MMX_PUNPCKHBW, ub, 8, 1)
+RECOMP_MMX_UNPACK(MMX_PUNPCKHWD, uw, 4, 1)
+RECOMP_MMX_UNPACK(MMX_PUNPCKHDQ, ud, 2, 1)
+
+/* Counts above the lane width clear logical shifts and fill arithmetic ones
+   with the sign. */
+#define RECOMP_MMX_SHIFT(name, field, count, bits, expr) \
+    static inline RecompMmx name(RecompMmx a, uint64_t n) \
+    { \
+        RecompMmx r; \
+        for (int i = 0; i < (count); ++i) r.field[i] = n > (bits) - 1u ? 0u : (expr); \
+        return r; \
+    }
+
+RECOMP_MMX_SHIFT(MMX_PSLLW, uw, 4, 16u, (uint16_t)(a.uw[i] << n))
+RECOMP_MMX_SHIFT(MMX_PSRLW, uw, 4, 16u, (uint16_t)(a.uw[i] >> n))
+RECOMP_MMX_SHIFT(MMX_PSLLD, ud, 2, 32u, a.ud[i] << n)
+RECOMP_MMX_SHIFT(MMX_PSRLD, ud, 2, 32u, a.ud[i] >> n)
+
+static inline RecompMmx MMX_PSLLQ(RecompMmx a, uint64_t n)
+{
+    a.q = n > 63u ? 0u : a.q << n;
+    return a;
+}
+
+static inline RecompMmx MMX_PSRLQ(RecompMmx a, uint64_t n)
+{
+    a.q = n > 63u ? 0u : a.q >> n;
+    return a;
+}
+
+static inline RecompMmx MMX_PSRAW(RecompMmx a, uint64_t count)
+{
+    RecompMmx r;
+    unsigned shift = count > 15u ? 15u : (unsigned)count;
+
+    for (int i = 0; i < 4; ++i) r.w[i] = (int16_t)(a.w[i] >> shift);
+    return r;
+}
+
+static inline RecompMmx MMX_PSRAD(RecompMmx a, uint64_t count)
+{
+    RecompMmx r;
+    unsigned shift = count > 31u ? 31u : (unsigned)count;
+
+    for (int i = 0; i < 2; ++i) r.d[i] = a.d[i] >> shift;
+    return r;
+}
+
+static inline RecompMmx MMX_PACKSSWB(RecompMmx a, RecompMmx b)
+{
+    RecompMmx r;
+
+    for (int i = 0; i < 4; ++i) {
+        r.b[i] = recomp_saturate_i8(a.w[i]);
+        r.b[i + 4] = recomp_saturate_i8(b.w[i]);
+    }
+    return r;
+}
+
+static inline RecompMmx MMX_PACKUSWB(RecompMmx a, RecompMmx b)
+{
+    RecompMmx r;
+
+    for (int i = 0; i < 4; ++i) {
+        r.ub[i] = recomp_saturate_u8(a.w[i]);
+        r.ub[i + 4] = recomp_saturate_u8(b.w[i]);
+    }
+    return r;
+}
+
+static inline RecompMmx MMX_PACKSSDW(RecompMmx a, RecompMmx b)
+{
+    RecompMmx r;
+
+    r.w[0] = recomp_saturate_i16(a.d[0]);
+    r.w[1] = recomp_saturate_i16(a.d[1]);
+    r.w[2] = recomp_saturate_i16(b.d[0]);
+    r.w[3] = recomp_saturate_i16(b.d[1]);
+    return r;
+}
+#endif
+
 static inline RecompMmx MMX_FROM32(uint32_t value)
 {
     RecompMmx result;
@@ -829,7 +1034,13 @@ static inline RecompMmx MMX_PINSRW(RecompMmx value, uint32_t word, uint32_t imm)
 
 static inline uint32_t MMX_PMOVMSKB(RecompMmx value)
 {
+#if RECOMP_HOST_X86
     return (uint32_t)_mm_movemask_epi8(recomp_mmx_vector(value));
+#else
+    uint32_t mask = 0u;
+    for (unsigned i = 0u; i < 8u; ++i) mask |= (uint32_t)(value.ub[i] >> 7) << i;
+    return mask;
+#endif
 }
 
 static inline uint32_t MMX_PEXTRW(RecompMmx a, uint32_t imm)

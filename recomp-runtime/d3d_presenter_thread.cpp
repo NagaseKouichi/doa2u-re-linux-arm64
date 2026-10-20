@@ -1,5 +1,5 @@
 #include "d3d_presenter_capture.h"
-#include "d3d_presenter_d3d11_backend.h"
+#include "d3d_presenter_backend.h"
 #include "d3d_vblank.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -114,19 +114,19 @@ void execute(PresenterThread &thread, RecompD3dPresenter *backend,
                 draw = command.type == RECOMP_D3D_PRESENTER_COMMAND_DRAW;
                 if (command.type == RECOMP_D3D_PRESENTER_COMMAND_DRAW_COVERAGE) {
                     bool covered = true;
-                    error = d3d11_backend_draw_coverage(backend, &command.data.draw, &covered);
+                    error = d3d_backend_draw_coverage(backend, &command.data.draw, &covered);
                     std::lock_guard<std::mutex> lock(thread.mutex);
                     thread.covered = covered;
-                } else error = d3d11_backend_submit(backend, &command);
+                } else error = d3d_backend_submit(backend, &command);
                 break;
             }
             case D3dCapturePacket::RELEASE:
             case D3dCapturePacket::INVALIDATE:
-                error = d3d11_backend_release_memory(backend, record.base, record.size,
+                error = d3d_backend_release_memory(backend, record.base, record.size,
                     record.kind == D3dCapturePacket::RELEASE);
                 break;
             case D3dCapturePacket::REPORT:
-                d3d11_backend_report_draw_textures();
+                d3d_backend_report_draw_textures();
                 break;
             }
         } catch (const std::bad_alloc &) {
@@ -168,12 +168,12 @@ bool resolveVisibility(PresenterThread &thread, RecompD3dPresenter *backend)
 {
     for (;;) {
         uint32_t index = 0u, pixels = 0u;
-        const auto state = d3d11_backend_poll_visibility(backend, &index, &pixels);
-        if (state == D3D11_VISIBILITY_FAILED) {
+        const auto state = d3d_backend_poll_visibility(backend, &index, &pixels);
+        if (state == D3D_BACKEND_VISIBILITY_FAILED) {
             fail(thread, RECOMP_D3D_PRESENTER_HOST_FAILURE);
             return false;
         }
-        if (state != D3D11_VISIBILITY_READY) return state == D3D11_VISIBILITY_PENDING;
+        if (state != D3D_BACKEND_VISIBILITY_READY) return state == D3D_BACKEND_VISIBILITY_PENDING;
         std::lock_guard<std::mutex> lock(thread.mutex);
         const auto found = thread.visibility.find(index);
         if (found != thread.visibility.end() && found->second.pending != 0u) {
@@ -189,7 +189,7 @@ void run(PresenterThread &thread, RecompD3dPresenterConfig config)
     RecompD3dPresenter *backend = nullptr;
     RecompD3dPresenterError created;
     try {
-        created = d3d11_backend_create(&config, &backend);
+        created = d3d_backend_create(&config, &backend);
     } catch (const std::bad_alloc &) {
         created = RECOMP_D3D_PRESENTER_OUT_OF_MEMORY;
     } catch (...) {
@@ -232,7 +232,7 @@ void run(PresenterThread &thread, RecompD3dPresenterConfig config)
         }
         thread.changed.notify_all();
     }
-    thread.destroyed = d3d11_backend_destroy(&backend);
+    thread.destroyed = d3d_backend_destroy(&backend);
     std::fprintf(stderr, "recomp d3d presenter thread: draw declines=%u\n",
         thread.draw_declines);
 }
@@ -464,7 +464,7 @@ RecompD3dPresenterError recomp_d3d_presenter_destroy(RecompD3dPresenter **presen
 
 void recomp_d3d_presenter_set_immediate_present(bool enabled)
 {
-    d3d11_backend_set_immediate_present(enabled);
+    d3d_backend_set_immediate_present(enabled);
 }
 
 void recomp_d3d_presenter_report_draw_textures()

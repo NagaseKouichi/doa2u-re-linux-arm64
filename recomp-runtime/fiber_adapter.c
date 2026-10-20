@@ -91,7 +91,7 @@ void recomp_fiber_adapter_reset(void)
     for (size_t i = 0u; i < RECOMP_FIBER_MAX_COUNT; ++i) {
         RecompHostFiber *host = &host_fibers[i];
         if (host->active && host != current_host_fiber && host->guest_stack_base != 0u) {
-            DeleteFiber(host->native_fiber);
+            recomp_native_fiber_delete(host->native_fiber);
         }
         *host = (RecompHostFiber){0};
     }
@@ -239,7 +239,7 @@ static void delete_fiber(void)
         !recomp_fiber_remove(&fiber_model, handle)) {
         fail_fiber("invalid-delete", handle);
     }
-    DeleteFiber(host->native_fiber);
+    recomp_native_fiber_delete(host->native_fiber);
     *host = (RecompHostFiber){.guest_stack_base = host->guest_stack_base,
         .guest_stack_size = host->guest_stack_size};
     finish(entry_esp, 1u, 0u);

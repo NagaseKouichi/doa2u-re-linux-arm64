@@ -9,7 +9,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Official SDL3 VC build for the Windows input host; SDL3.dll is copied beside
-# each target that uses it.
+# each target that uses it. macOS and Linux render, play audio and read input
+# through SDL3 (docs/building.md).
 if(WIN32)
     if(POLICY CMP0135)
         cmake_policy(SET CMP0135 NEW)
@@ -37,6 +38,91 @@ if(WIN32)
         add_custom_command(TARGET ${target} POST_BUILD COMMAND "${CMAKE_COMMAND}" -E
             copy_if_different "$<TARGET_FILE:SDL3::SDL3>" "$<TARGET_FILE_DIR:${target}>")
     endfunction()
+else()
+    # macOS builds need SDL3 (brew install sdl3). Linux uses the system SDL3,
+    # or builds it when RECOMP_FETCH_SDL3 is on, as build_game.py asks (Ubuntu
+    # 24.04 has no package). Hosts with neither only configure.
+    option(RECOMP_FETCH_SDL3 "Build SDL3 when the system has none" OFF)
+    find_package(SDL3 QUIET)
+    if(APPLE AND NOT SDL3_FOUND)
+        message(FATAL_ERROR "SDL3 is required: brew install sdl3")
+    endif()
+    if(NOT SDL3_FOUND AND RECOMP_FETCH_SDL3)
+        if(POLICY CMP0135)
+            cmake_policy(SET CMP0135 NEW)
+        endif()
+        include(FetchContent)
+        # The release DOA3's Steam Deck build was tested with, pinned like the Windows zip.
+        FetchContent_Declare(SDL3
+            URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.12/SDL3-3.4.12.tar.gz
+            URL_HASH SHA256=f07b958a9ac5020fb7a44cadb957f658b2149c3c8abb4f63145fac9303249db7)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_SHARED ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(SDL3)
+        set(SDL3_FOUND TRUE)
+    endif()
+    function(recomp_use_sdl3 target)
+        if(SDL3_FOUND)
+            target_link_libraries(${target} PRIVATE SDL3::SDL3)
+        endif()
+    endfunction()
+    # The SDL_GPU presenter compiles its HLSL with shaderc. Linux loads
+    # libshaderc at run time; macOS links Homebrew's shaderc and turns the
+    # SPIR-V into MSL with SPIRV-Cross (brew install shaderc spirv-cross).
+    if(APPLE)
+        find_path(RECOMP_SHADERC_INCLUDE shaderc/shaderc.h REQUIRED)
+        find_library(RECOMP_SHADERC_LIBRARY shaderc_shared REQUIRED)
+        find_path(RECOMP_SPIRV_CROSS_INCLUDE spirv_cross/spirv_cross_c.h REQUIRED)
+        set(RECOMP_SPIRV_CROSS_LIBRARIES)
+        foreach(_component c msl glsl hlsl cpp reflect core)
+            find_library(_spirv_cross_${_component} spirv-cross-${_component} REQUIRED)
+            list(APPEND RECOMP_SPIRV_CROSS_LIBRARIES "${_spirv_cross_${_component}}")
+        endforeach()
+    endif()
+    function(recomp_use_shader_compiler target)
+        if(APPLE)
+            target_compile_definitions(${target} PRIVATE RECOMP_SHADERC_LINKED)
+            target_include_directories(${target} PRIVATE
+                "${RECOMP_SHADERC_INCLUDE}" "${RECOMP_SPIRV_CROSS_INCLUDE}")
+            target_link_libraries(${target} PRIVATE "${RECOMP_SHADERC_LIBRARY}" ${RECOMP_SPIRV_CROSS_LIBRARIES})
+        else()
+            target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+        endif()
+    endfunction()
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Threads REQUIRED)
+    add_compile_definitions(_GNU_SOURCE)
+    # glibc keeps libm separate; macOS links it with libSystem.
+    link_libraries(Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
+
+# Clang contracts a*b+c into FMA by default on AArch64. Keep IEEE operation
+# order so guest float results match the x86 hosts and the Windows build.
+# Generated code reads the same guest bytes as float and integer and relies on
+# 32-bit wraparound, so GCC and Clang must not optimize on strict aliasing or
+# signed overflow; MSVC does neither.
+if(NOT MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-fno-strict-aliasing>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-fwrapv>)
+endif()
+
+# POSIX fibers switch stacks in assembly (native_fiber.c).
+if(NOT WIN32)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        set(RECOMP_FIBER_ASM fiber_switch_arm64.S)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+        set(RECOMP_FIBER_ASM fiber_switch_x86_64.S)
+    endif()
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(RECOMP_FIBER_ASM fiber_switch_arm64.S)
+    elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        set(RECOMP_FIBER_ASM fiber_switch_x86_64.S)
+    endif()
+    enable_language(ASM)
 endif()
 
 include(CTest)
@@ -134,12 +220,17 @@ add_executable(recomp_input_pulse_source_test input_pulse_source.c input_pulse_s
 target_compile_definitions(recomp_input_pulse_source_test PRIVATE RECOMP_INPUT_PULSE_SOURCE_STANDALONE)
 add_test(NAME recomp-runtime-input-pulses COMMAND recomp_input_pulse_source_test)
 
+add_library(recomp_keyboard STATIC input_keyboard_win32.c)
+add_executable(recomp_input_host_test input_host_win32.c input_host_win32_test.c)
+target_link_libraries(recomp_input_host_test PRIVATE recomp_keyboard)
+recomp_use_sdl3(recomp_input_host_test)
 if(WIN32)
-    add_library(recomp_keyboard STATIC input_keyboard_win32.c)
-    add_executable(recomp_input_host_test input_host_win32.c input_host_win32_test.c)
-    target_link_libraries(recomp_input_host_test PRIVATE user32 recomp_keyboard)
-    recomp_use_sdl3(recomp_input_host_test)
+    target_link_libraries(recomp_input_host_test PRIVATE user32)
     add_test(NAME recomp-runtime-input-host-sdl COMMAND recomp_input_host_test)
+elseif(SDL3_FOUND)
+    add_test(NAME recomp-runtime-input-host-sdl COMMAND recomp_input_host_test)
+endif()
+if(WIN32)
     add_library(recomp_audio STATIC audio_output_xaudio2.cpp audio_capture_xapo.cpp)
     target_include_directories(recomp_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(recomp_audio PUBLIC xaudio2 xapobase ole32)
@@ -154,21 +245,51 @@ if(WIN32)
         add_test(NAME recomp-runtime-audio-host COMMAND recomp_audio_host_test)
         set_tests_properties(recomp-runtime-audio-host PROPERTIES TIMEOUT 10)
     endif()
-    add_executable(recomp_d3d_vblank_test d3d_vblank.cpp xapi_clock.cpp d3d_vblank_test.cpp)
-    add_test(NAME recomp-runtime-d3d-vblank COMMAND recomp_d3d_vblank_test)
-    add_test(NAME recomp-runtime-unpaced COMMAND "${CMAKE_COMMAND}" -E env
-        RECOMP_UNPACED=1 "$<TARGET_FILE:recomp_d3d_vblank_test>")
+else()
+    add_library(recomp_audio STATIC audio_output_sdl.cpp audio_reverb.cpp)
+    target_include_directories(recomp_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    recomp_use_sdl3(recomp_audio)
+    add_executable(recomp_audio_output_test audio_output_sdl_test.cpp)
+    target_link_libraries(recomp_audio_output_test PRIVATE recomp_audio)
+    recomp_use_sdl3(recomp_audio_output_test)
+    if(SDL3_FOUND)
+        add_test(NAME recomp-runtime-audio-output COMMAND recomp_audio_output_test)
+    endif()
+endif()
+add_executable(recomp_d3d_vblank_test d3d_vblank.cpp xapi_clock.cpp d3d_vblank_test.cpp)
+add_test(NAME recomp-runtime-d3d-vblank COMMAND recomp_d3d_vblank_test)
+add_test(NAME recomp-runtime-unpaced COMMAND "${CMAKE_COMMAND}" -E env
+    RECOMP_UNPACED=1 "$<TARGET_FILE:recomp_d3d_vblank_test>")
+add_executable(recomp_d3d_capture_test d3d_presenter_capture_test.cpp d3d_presenter_capture.cpp)
+add_test(NAME recomp-runtime-d3d-capture COMMAND recomp_d3d_capture_test)
+# The draw shader and constants are shared; the rest of the presenter is
+# Direct3D 11 on Windows and SDL_GPU elsewhere.
+set(RECOMP_PRESENTER_SHARED d3d_draw_shader.cpp d3d_vertex_program.cpp d3d_draw_model.c
+    d3d_texture_model.c d3d_vblank.cpp)
+if(WIN32)
     add_library(recomp_d3d_presenter STATIC
         d3d_presenter_d3d11.cpp d3d_presenter_thread.cpp d3d_presenter_capture.cpp
-        d3d_vertex_program.cpp d3d_draw_model.c d3d_texture_model.c d3d_vblank.cpp)
+        ${RECOMP_PRESENTER_SHARED})
     target_include_directories(recomp_d3d_presenter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(recomp_d3d_presenter PUBLIC d3d11 d3dcompiler dxgi user32 recomp_keyboard)
-    add_executable(recomp_d3d_capture_test d3d_presenter_capture_test.cpp d3d_presenter_capture.cpp)
-    add_test(NAME recomp-runtime-d3d-capture COMMAND recomp_d3d_capture_test)
-    add_executable(recomp_d3d_presenter_test d3d_presenter_thread_test.cpp xapi_clock.cpp d3d_card_model.c)
-    target_link_libraries(recomp_d3d_presenter_test PRIVATE recomp_d3d_presenter)
+else()
+    add_library(recomp_d3d_presenter STATIC
+        d3d_presenter_sdl_gpu.cpp d3d_presenter_inline.cpp d3d_shader_compiler.cpp
+        ${RECOMP_PRESENTER_SHARED})
+    target_include_directories(recomp_d3d_presenter PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(recomp_d3d_presenter PUBLIC recomp_keyboard)
+    recomp_use_sdl3(recomp_d3d_presenter)
+    recomp_use_shader_compiler(recomp_d3d_presenter)
+endif()
+add_executable(recomp_d3d_presenter_test d3d_presenter_thread_test.cpp xapi_clock.cpp d3d_card_model.c)
+target_link_libraries(recomp_d3d_presenter_test PRIVATE recomp_d3d_presenter)
+if(NOT WIN32)
+    target_sources(recomp_d3d_presenter_test PRIVATE win32_compat.c)
+    recomp_use_sdl3(recomp_d3d_presenter_test)
+endif()
+if(WIN32 OR SDL3_FOUND)
     add_test(NAME recomp-runtime-d3d-presenter COMMAND recomp_d3d_presenter_test)
-    set_tests_properties(recomp-runtime-d3d-presenter PROPERTIES TIMEOUT 30)
+    set_tests_properties(recomp-runtime-d3d-presenter PROPERTIES TIMEOUT 60)
 endif()
 
 add_executable(recomp_program_abi_call_test program_abi_call_test.c)
@@ -177,14 +298,22 @@ add_test(NAME recomp-runtime-program-abi-call COMMAND recomp_program_abi_call_te
 add_executable(recomp_guest_heap_test guest_heap.c guest_heap_test.c)
 add_test(NAME recomp-runtime-guest-heap COMMAND recomp_guest_heap_test)
 
-if(WIN32)
 add_library(recomp_xbe STATIC ../xbe/sha.cpp ../xbe/xbe_parser.cpp runner_load.cpp)
 target_include_directories(recomp_xbe PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../xbe" "${CMAKE_CURRENT_SOURCE_DIR}")
 add_executable(recomp_runner_load_test runner_load_test.cpp)
 target_link_libraries(recomp_runner_load_test PRIVATE recomp_xbe)
 add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
-
+add_executable(recomp_sha_test sha_test.cpp ../xbe/sha.cpp)
+target_include_directories(recomp_sha_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../xbe")
+add_test(NAME recomp-runtime-sha COMMAND recomp_sha_test)
+if(WIN32)
     target_link_libraries(recomp_xbe PUBLIC bcrypt)
+    target_link_libraries(recomp_sha_test PRIVATE bcrypt)
+else()
+    add_executable(recomp_win32_compat_test win32_compat.c win32_compat_test.c)
+    add_test(NAME recomp-runtime-win32-compat COMMAND recomp_win32_compat_test)
+endif()
+
     add_library(recomp_kernel STATIC
         runtime.c stop_report.c guest_heap.c xapi_clock.cpp native_fiber.c
         fiber_model.c fiber_adapter.c
@@ -194,7 +323,11 @@ add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
         device_model.c apu_model.c ohci_model.c directory_model.c symbolic_link_model.c
         save_transaction.cpp)
     target_include_directories(recomp_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(recomp_kernel PUBLIC bcrypt)
+    if(WIN32)
+        target_link_libraries(recomp_kernel PUBLIC bcrypt)
+    else()
+        target_sources(recomp_kernel PRIVATE win32_compat.c ${RECOMP_FIBER_ASM})
+    endif()
     add_executable(recomp_kernel_test kernel_test.c kernel_device_test.c kernel_crypto_test.c
         kernel_memory_test.c kernel_rtl_test.c kernel_thread_test.c kernel_video_test.c
         flag_macro_test.c sse_semantics_test.c)
@@ -207,7 +340,6 @@ add_test(NAME recomp-runtime-runner-load COMMAND recomp_runner_load_test)
     target_link_libraries(recomp_kernel_scheduler_test PRIVATE recomp_kernel)
     add_test(NAME recomp-runtime-kernel-scheduler COMMAND recomp_kernel_scheduler_test)
     set_tests_properties(recomp-runtime-kernel-scheduler PROPERTIES TIMEOUT 10)
-endif()
 
 set(RECOMP_PROGRAM_DIR "" CACHE PATH "Authenticated complete generated-source snapshot")
 set(RECOMP_PROGRAM_MANIFEST_SHA256 "" CACHE STRING "SHA-256 of the generated-source manifest")
@@ -219,9 +351,6 @@ if((RECOMP_PROGRAM_DIR AND NOT RECOMP_PROGRAM_MANIFEST_SHA256) OR
 endif()
 
 if(RECOMP_PROGRAM_DIR)
-    if(NOT WIN32)
-        message(FATAL_ERROR "The initial kernel-only runner requires Windows")
-    endif()
     get_filename_component(_program_dir "${RECOMP_PROGRAM_DIR}" ABSOLUTE
         BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
     get_filename_component(_program_dir "${_program_dir}" REALPATH)
@@ -320,7 +449,17 @@ if(RECOMP_PROGRAM_DIR)
     if(MSVC)
         target_compile_options(recomp_program_runner PRIVATE /we4013)
     endif()
-    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe recomp_d3d_presenter recomp_audio dbghelp user32)
+    target_link_libraries(recomp_program_runner PRIVATE recomp_kernel recomp_xbe recomp_d3d_presenter recomp_audio)
+    if(WIN32)
+        target_link_libraries(recomp_program_runner PRIVATE dbghelp user32)
+    endif()
     recomp_use_sdl3(recomp_program_runner)
     target_include_directories(recomp_program_runner PRIVATE "${_derived_dir}")
+
+    # Settings launcher for launcher.sh. SteamOS has no compiler, so it is built
+    # beside the runner rather than on first use like the macOS launcher.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(recomp_launcher ../tools/launcher_sdl.cpp)
+        recomp_use_sdl3(recomp_launcher)
+    endif()
 endif()
