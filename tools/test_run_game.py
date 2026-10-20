@@ -181,6 +181,20 @@ foreach ($enabled in @($true, $false)) {
                 prepare_disc(source, disc)
             self.assertFalse(disc.exists())
 
+    def test_failed_hardlink_explains_the_drive_and_removes_staging(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, disc = root / "source", root / "play"
+            source.mkdir()
+            (source / "payload.txt").write_text("synthetic content")
+            error = OSError(1, "Incorrect function")
+            with patch("run_game.os.link", side_effect=error), \
+                    self.assertRaisesRegex(ValueError, "NTFS"):
+                prepare_disc(source, disc)
+            self.assertFalse((root / "play.tmp").exists())
+            prepare_disc(source, disc)
+            self.assertTrue((source / "payload.txt").samefile(disc / "payload.txt"))
+
     def test_seeds_hdd_cache_with_copies_and_replaces_partial_archives(self):
         with tempfile.TemporaryDirectory() as folder:
             disc = Path(folder)

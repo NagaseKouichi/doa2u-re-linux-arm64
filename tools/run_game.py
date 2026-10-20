@@ -23,16 +23,24 @@ def prepare_disc(source, disc):
         return
     staging = disc.with_name(disc.name + ".tmp")
     staging.mkdir(parents=True)
-    for path in source.rglob("*"):
-        relative = path.relative_to(source)
-        if relative.parts[0] == ".recomp-storage":
-            continue
-        if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
-            raise ValueError("Disc source contains a link")
-        if path.is_file():
-            destination = staging / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.link(path, destination)
+    try:
+        for path in source.rglob("*"):
+            relative = path.relative_to(source)
+            if relative.parts[0] == ".recomp-storage":
+                continue
+            if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                raise ValueError("Disc source contains a link")
+            if path.is_file():
+                destination = staging / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(path, destination)
+                except OSError as error:
+                    raise ValueError(f"Cannot hardlink the disc into {disc} ({error.strerror}); "
+                                     "move this folder to an NTFS drive") from error
+    except BaseException:
+        shutil.rmtree(staging)  # Holds only links to the import, so no saves are lost.
+        raise
     staging.rename(disc)
 
 

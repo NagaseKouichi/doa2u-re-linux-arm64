@@ -20,7 +20,9 @@ What you need (Windows 10 or 11, 64-bit):
 
 Build (once, about 15 minutes):
 
-1. Extract this ZIP to a folder with a short path, for example C:\DOA2U.
+1. Extract this ZIP to a folder with a short path on an NTFS drive, for
+   example C:\DOA2U. FAT32 and exFAT drives, common on USB sticks, cannot
+   hold the play folder's hardlinks.
 2. Drag your Disc 2 ISO onto BuildGame.cmd. The ISO is only read.
 3. Wait for "Build complete". The build is checked against the exact
    program the developers tested; any difference stops the build.
@@ -54,6 +56,7 @@ the safari stage's heat haze does not ripple yet.
 Reporting problems: open an issue at
 https://github.com/NoRain211/doa2u-re/issues and say what you did and what
 happened. Copy the "recomp stop" or crash lines from the end of the newest
-log in private\play-logs, or the error from the newest private\build-logs
-folder if the build failed. Remove your user name and other private paths,
+log in private\play-logs, the error play.cmd shows if there is no log, or
+the error from the newest private\build-logs folder if the build failed.
+Remove your user name and other private paths,
 and do not upload whole logs or any game files.
