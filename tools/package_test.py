@@ -33,6 +33,7 @@ def archive(cwd, prefix):
                 # Keep Git's file mode so the shell scripts stay executable after unzipping.
                 info = zipfile.ZipInfo(prefix + member.name, time.localtime()[:6])
                 info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3  # Unix, or unzip ignores the mode below
                 info.external_attr = (0o100000 | member.mode) << 16
                 yield info, tar.extractfile(member).read()
 
