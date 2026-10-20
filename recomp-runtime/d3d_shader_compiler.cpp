@@ -189,7 +189,7 @@ bool translateMsl(const std::vector<uint8_t> &spirv, bool vertex, RecompCompiled
     spvc_compiler_options_set_uint(options, SPVC_COMPILER_OPTION_MSL_PLATFORM, SPVC_MSL_PLATFORM_MACOS);
     if (spvc_compiler_install_compiler_options(compiler, options) != SPVC_SUCCESS) return fail("spirv-cross install");
     const SpvExecutionModel stage = vertex ? SpvExecutionModelVertex : SpvExecutionModelFragment;
-    for (unsigned slot = 0u; slot < 4u; ++slot) {
+    for (unsigned slot = 0u; slot < 8u; ++slot) {
         spvc_msl_resource_binding_2 binding;
         spvc_msl_resource_binding_init_2(&binding);
         binding.stage = stage;

@@ -20,18 +20,6 @@ if(WIN32)
         URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-devel-3.4.16-VC.zip
         URL_HASH SHA256=1a784cb2a5c64d56fe7a62090fe9d242d9865f235e4ea9678f1a6ba4e693e7de)
     FetchContent_MakeAvailable(SDL3)
-    # Same upstream SMAA revision as DOA3; keep its license with the source.
-    FetchContent_Declare(smaa
-        URL https://codeload.github.com/iryoku/smaa/tar.gz/71c806a838bdd7d517df19192a20f0c61b3ca29d
-        URL_HASH SHA256=046a435f5713f8bfe8148fe6305c2abf1409fc2122bee6070061c675e1e55f57)
-    FetchContent_MakeAvailable(smaa)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${smaa_SOURCE_DIR}/SMAA.hlsl")
-    file(READ "${smaa_SOURCE_DIR}/SMAA.hlsl" _smaa_hex HEX)
-    string(REGEX REPLACE "(..)" "0x\\1," _smaa_hex "${_smaa_hex}")
-    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/smaa_hlsl.inc" CONTENT "${_smaa_hex}")
-    set_source_files_properties(d3d_presenter_d3d11.cpp
-        PROPERTIES COMPILE_DEFINITIONS RECOMP_SMAA
-        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR};${smaa_SOURCE_DIR}/Textures")
     find_package(SDL3 3.4 CONFIG REQUIRED PATHS "${sdl3_SOURCE_DIR}/cmake" NO_DEFAULT_PATH)
     function(recomp_use_sdl3 target)
         target_link_libraries(${target} PRIVATE SDL3::SDL3)
@@ -109,6 +97,24 @@ if(NOT MSVC)
         $<$<COMPILE_LANGUAGE:C,CXX>:-fno-strict-aliasing>
         $<$<COMPILE_LANGUAGE:C,CXX>:-fwrapv>)
 endif()
+
+# Same upstream SMAA revision as DOA3; keep its license with the source. Both
+# presenters compile SMAA.hlsl: D3DCompile on Windows, shaderc elsewhere.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+include(FetchContent)
+FetchContent_Declare(smaa
+    URL https://codeload.github.com/iryoku/smaa/tar.gz/71c806a838bdd7d517df19192a20f0c61b3ca29d
+    URL_HASH SHA256=046a435f5713f8bfe8148fe6305c2abf1409fc2122bee6070061c675e1e55f57)
+FetchContent_MakeAvailable(smaa)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${smaa_SOURCE_DIR}/SMAA.hlsl")
+file(READ "${smaa_SOURCE_DIR}/SMAA.hlsl" _smaa_hex HEX)
+string(REGEX REPLACE "(..)" "0x\\1," _smaa_hex "${_smaa_hex}")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/smaa_hlsl.inc" CONTENT "${_smaa_hex}")
+set_source_files_properties(d3d_presenter_d3d11.cpp d3d_presenter_sdl_gpu.cpp
+    PROPERTIES COMPILE_DEFINITIONS RECOMP_SMAA
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR};${smaa_SOURCE_DIR}/Textures")
 
 # POSIX fibers switch stacks in assembly (native_fiber.c).
 if(NOT WIN32)

@@ -2621,10 +2621,6 @@ static bool testDrawCoverage(bool scaled_msaa = false)
 
 static bool testWidescreenAntialiasing(bool smaa, bool msaa, unsigned height = 480u, unsigned samples = 4u)
 {
-#ifndef _WIN32
-    // SMAA is a Direct3D 11 pass; the SDL_GPU presenter offers MSAA only.
-    if (smaa) return true;
-#endif
     char folder[MAX_PATH], path[MAX_PATH];
     if (!GetTempPathA(MAX_PATH, folder) || !GetTempFileNameA(folder, "aa", 0, path)) return false;
     _putenv_s("RECOMP_D3D_FRAME_DUMP", path);

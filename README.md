@@ -88,7 +88,7 @@ keeps running.
 | Xbox and other SDL3 controllers, keyboard | Working; keyboard drives player 1 |
 | Xbox Live menus | Stop the game; there is no online service |
 | Hand-written game logic | Not started; the game runs as generated code |
-| macOS and Linux | Boot, menus and the attract demo render at 60 fps through Metal and Vulkan; MSAA up to 8x, no SMAA ([building](docs/building.md)) |
+| macOS and Linux | Boot, menus and the attract demo render at 60 fps through Metal and Vulkan, with MSAA up to 8x and SMAA ([building](docs/building.md)) |
 
 **Known issues:** a demanding moment on The Burai Zenin can still drop a
 single frame; the safari stage's heat haze does not ripple yet, and its water

@@ -56,8 +56,8 @@ same manifest hash as the Windows build, so a different lifter or input stops
 the build before it compiles. The ISO is extracted once into
 `private/imported-disc`, about 4.1 GB.
 
-`./launcher.sh` opens a window to pick resolution, MSAA, widescreen and the
-intro skip, saves them to `private/launcher.json` and starts the game.
+`./launcher.sh` opens a window to pick resolution, MSAA, SMAA, widescreen and
+the intro skip, saves them to `private/launcher.json` and starts the game.
 `./run_game.sh` starts the game with the saved choices, and
 `./run_game.sh --play --resolution 1080 --msaa 4 --widescreen` with explicit
 ones. As on Windows, the game keeps its cache and saves in
@@ -93,8 +93,8 @@ that shortcut.
 
 ## Differences from the Windows build
 
-- SMAA needs the Direct3D 11 presenter. The launchers offer MSAA only, up to
-  the 8x SDL_GPU supports (Apple GPUs stop at 4x).
+- MSAA stops at the 8x SDL_GPU supports (Apple GPUs at 4x); a higher choice
+  falls back as on Windows. SMAA runs the same upstream shader.
 - SDL_GPU has no geometry shaders or occlusion queries. Wide and antialiased
   lines are expanded on the CPU, a draw's coverage probe rasterizes on the
   CPU, and the glare fade's visibility tests count passing samples with an

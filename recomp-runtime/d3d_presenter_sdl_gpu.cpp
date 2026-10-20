@@ -5,7 +5,7 @@
    sizes, declines and resource lifetimes. Where SDL_GPU lacks a Direct3D 11
    feature this file says so: widened lines are expanded on the CPU instead of
    in a geometry shader, coverage probes rasterize on the CPU, and occlusion
-   counts come from an additive pass. SMAA, VRR and RECOMP_D3D_PRESENT_LOG are
+   counts come from an additive pass. VRR and RECOMP_D3D_PRESENT_LOG are
    Direct3D 11 only. */
 #include "d3d_presenter_backend.h"
 #include "d3d_draw_model.h"
@@ -36,6 +36,14 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifdef RECOMP_SMAA
+#include "AreaTex.h"
+#include "SearchTex.h"
+static const unsigned char kSmaaSource[] = {
+#include "smaa_hlsl.inc"
+};
+#endif
 
 namespace {
 
@@ -309,6 +317,9 @@ struct RecompD3dPresenter {
     // SetGammaRamp applies when a frame is shown; guest reads stay uncorrected.
     bool gamma_enabled = false;
     float gamma_ramp[256][4]{};
+    bool smaa = false;  // RECOMP_D3D_SMAA: post-process the output
+    SDL_GPUGraphicsPipeline *smaa_pipelines[3]{};  // edges, weights, blend
+    SDL_GPUTexture *smaa_textures[5]{};  // edges, area, search, weights, output
     SDL_GPUGraphicsPipeline *gamma_pipeline = nullptr;
     SDL_GPUTexture *gamma_target = nullptr;
 
@@ -2388,6 +2399,154 @@ const char kGammaShader[] =
     " uint3 i = (uint3)(saturate(c.rgb) * 255 + 0.5);\n"
     " return float4(ramp[i.r].r, ramp[i.g].g, ramp[i.b].b, c.a); }\n";
 
+/* SMAA 1x (iryoku/smaa, ultra preset) on the final resolved image, from the
+   same HLSL as the Direct3D 11 presenter. Textures 0-4 are color, edges,
+   area, search and weights; slots 0 and 1 also carry the linear and point
+   samplers the shader names. */
+bool createSmaa(RecompD3dPresenter *presenter)
+{
+#ifdef RECOMP_SMAA
+    static const char prefix[] =
+        "#define SMAA_CUSTOM_SL\n#define SMAA_PRESET_ULTRA\n"
+        "[[vk::binding(0, 2)]] SamplerState LinearSampler : register(s0);\n"
+        "[[vk::binding(1, 2)]] SamplerState PointSampler : register(s1);\n"
+        "#define SMAATexture2D(tex) Texture2D tex\n"
+        "#define SMAATexturePass2D(tex) tex\n"
+        "#define SMAASampleLevelZero(tex, coord) tex.SampleLevel(LinearSampler, coord, 0)\n"
+        "#define SMAASampleLevelZeroPoint(tex, coord) tex.SampleLevel(PointSampler, coord, 0)\n"
+        "#define SMAASampleLevelZeroOffset(tex, coord, offset) tex.SampleLevel(LinearSampler, coord, 0, offset)\n"
+        "#define SMAASample(tex, coord) tex.Sample(LinearSampler, coord)\n"
+        "#define SMAASamplePoint(tex, coord) tex.Sample(PointSampler, coord)\n"
+        "#define SMAASampleOffset(tex, coord, offset) tex.Sample(LinearSampler, coord, offset)\n"
+        "#define SMAA_FLATTEN [flatten]\n#define SMAA_BRANCH [branch]\n";
+    static const char suffix[] =
+        "\n[[vk::binding(0, 2)]] Texture2D colorTex : register(t0);\n"
+        "[[vk::binding(1, 2)]] Texture2D edgesTex : register(t1);\n"
+        "[[vk::binding(2, 2)]] Texture2D areaTex : register(t2);\n"
+        "[[vk::binding(3, 2)]] Texture2D searchTex : register(t3);\n"
+        "[[vk::binding(4, 2)]] Texture2D blendTex : register(t4);\n"
+        "void fullscreen(uint id, out float4 pos, out float2 uv) {\n"
+        " uv = float2((id << 1) & 2, id & 2); pos = float4(uv * float2(2,-2) + float2(-1,1), 0, 1); }\n"
+        "void vs_edges(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0,\n"
+        " out float4 offset[3] : TEXCOORD1) { fullscreen(id, pos, uv); SMAAEdgeDetectionVS(uv, offset); }\n"
+        "float2 ps_edges(float4 pos : SV_Position, float2 uv : TEXCOORD0, float4 offset[3] : TEXCOORD1)\n"
+        " : SV_Target { return SMAALumaEdgeDetectionPS(uv, offset, colorTex); }\n"
+        "void vs_weights(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0,\n"
+        " out float2 pix : TEXCOORD1, out float4 offset[3] : TEXCOORD2) {\n"
+        " fullscreen(id, pos, uv); SMAABlendingWeightCalculationVS(uv, pix, offset); }\n"
+        "float4 ps_weights(float4 pos : SV_Position, float2 uv : TEXCOORD0, float2 pix : TEXCOORD1,\n"
+        " float4 offset[3] : TEXCOORD2) : SV_Target {\n"
+        " return SMAABlendingWeightCalculationPS(uv, pix, offset, edgesTex, areaTex, searchTex, 0); }\n"
+        "void vs_blend(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0,\n"
+        " out float4 offset : TEXCOORD1) { fullscreen(id, pos, uv); SMAANeighborhoodBlendingVS(uv, offset); }\n"
+        "float4 ps_blend(float4 pos : SV_Position, float2 uv : TEXCOORD0, float4 offset : TEXCOORD1)\n"
+        " : SV_Target { return SMAANeighborhoodBlendingPS(uv, offset, colorTex, blendTex); }\n";
+    const uint32_t width = mainWidth(presenter), height = mainHeight(presenter);
+    char metrics[160];
+    std::snprintf(metrics, sizeof metrics, "SMAA_RT_METRICS=float4(1.0/%u.0,1.0/%u.0,%u.0,%u.0)",
+        width, height, width, height);
+    std::string source = prefix;
+    source.append(reinterpret_cast<const char *>(kSmaaSource), sizeof kSmaaSource);
+    source += suffix;
+    const std::vector<std::string> defines = {metrics};
+    static const char *const passes[3] = {"edges", "weights", "blend"};
+    const SDL_GPUTextureFormat formats[3] = {SDL_GPU_TEXTUREFORMAT_R8G8_UNORM,
+        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM};
+    bool ready = true;
+    for (unsigned pass = 0u; pass < 3u && ready; ++pass) {
+        SDL_GPUShader *shaders[2]{};
+        for (unsigned stage = 0u; stage < 2u; ++stage) {
+            const std::string entry = std::string(stage == 0u ? "vs_" : "ps_") + passes[pass];
+            RecompCompiledShader compiled;
+            std::string error;
+            if (!recomp_shader_compile(source, entry.c_str(), stage == 0u, presenter->shader_target, defines,
+                    compiled, error)) {
+                std::fprintf(stderr, "recomp d3d presenter: smaa compile %s: %s\n", entry.c_str(), error.c_str());
+                ready = false;
+                break;
+            }
+            SDL_GPUShaderCreateInfo info{};
+            info.code = compiled.code.data();
+            info.code_size = compiled.code.size();
+            info.entrypoint = compiled.entry_point.c_str();
+            info.format = presenter->shader_format;
+            info.stage = stage == 0u ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
+            info.num_samplers = stage == 0u ? 0u : 5u;
+            shaders[stage] = SDL_CreateGPUShader(presenter->device, &info);
+            ready = shaders[stage] != nullptr;
+        }
+        if (ready) {
+            SDL_GPUColorTargetDescription color{};
+            color.format = formats[pass];
+            SDL_GPUGraphicsPipelineCreateInfo info{};
+            info.vertex_shader = shaders[0];
+            info.fragment_shader = shaders[1];
+            info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            info.target_info.color_target_descriptions = &color;
+            info.target_info.num_color_targets = 1u;
+            presenter->smaa_pipelines[pass] = SDL_CreateGPUGraphicsPipeline(presenter->device, &info);
+            ready = presenter->smaa_pipelines[pass] != nullptr;
+        }
+        for (SDL_GPUShader *shader : shaders) {
+            if (shader != nullptr) SDL_ReleaseGPUShader(presenter->device, shader);
+        }
+    }
+    const SDL_GPUTextureUsageFlags target = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    if (ready) {
+        auto &textures = presenter->smaa_textures;
+        textures[0] = createTexture(presenter, SDL_GPU_TEXTURETYPE_2D, formats[0], target, width, height);
+        textures[1] = createTexture(presenter, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREFORMAT_R8G8_UNORM,
+            SDL_GPU_TEXTUREUSAGE_SAMPLER, AREATEX_WIDTH, AREATEX_HEIGHT);
+        textures[2] = createTexture(presenter, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+            SDL_GPU_TEXTUREUSAGE_SAMPLER, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT);
+        textures[3] = createTexture(presenter, SDL_GPU_TEXTURETYPE_2D, formats[1], target, width, height);
+        textures[4] = createTexture(presenter, SDL_GPU_TEXTURETYPE_2D, formats[2], target, width, height);
+        for (SDL_GPUTexture *texture : textures) ready &= texture != nullptr;
+        ready = ready &&
+            uploadTexture(presenter, textures[1], areaTexBytes, sizeof areaTexBytes, 0u, AREATEX_WIDTH,
+                AREATEX_HEIGHT, 1u, AREATEX_PITCH / 2u) &&
+            uploadTexture(presenter, textures[2], searchTexBytes, sizeof searchTexBytes, 0u, SEARCHTEX_WIDTH,
+                SEARCHTEX_HEIGHT, 1u, SEARCHTEX_PITCH);
+    }
+    if (!ready) {
+        std::fprintf(stderr, "recomp d3d presenter: smaa unavailable: %s\n", SDL_GetError());
+        return false;
+    }
+    std::fprintf(stderr, "recomp d3d presenter: smaa ultra %ux%u\n", width, height);
+    return true;
+#else
+    (void)presenter;
+    return false;
+#endif
+}
+
+/* Runs SMAA's three passes over the resolved back buffer into its output. */
+SDL_GPUTexture *runSmaa(RecompD3dPresenter *presenter, SDL_GPUCommandBuffer *commands, SDL_GPUTexture *color)
+{
+    auto &textures = presenter->smaa_textures;
+    SDL_GPUTexture *const targets[3] = {textures[0], textures[3], textures[4]};
+    for (unsigned pass = 0u; pass < 3u; ++pass) {
+        SDL_GPUColorTargetInfo target{};
+        target.texture = targets[pass];
+        target.load_op = pass < 2u ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_DONT_CARE;
+        target.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass *render = SDL_BeginGPURenderPass(commands, &target, 1, nullptr);
+        if (render == nullptr) return color;
+        // Never sample the target being drawn: unused slots get the white texture.
+        const SDL_GPUTextureSamplerBinding bindings[5] = {
+            {color, presenter->filter_sampler},
+            {pass == 1u ? textures[0] : presenter->white_texture, presenter->point_sampler},
+            {textures[1], presenter->filter_sampler},
+            {textures[2], presenter->point_sampler},
+            {pass == 2u ? textures[3] : presenter->white_texture, presenter->filter_sampler}};
+        SDL_BindGPUGraphicsPipeline(render, presenter->smaa_pipelines[pass]);
+        SDL_BindGPUFragmentSamplers(render, 0u, bindings, 5u);
+        SDL_DrawGPUPrimitives(render, 3u, 1u, 0u, 0u);
+        SDL_EndGPURenderPass(render);
+    }
+    return textures[4];
+}
+
 bool ensureGammaPass(RecompD3dPresenter *presenter)
 {
     if (presenter->gamma_pipeline != nullptr) return true;
@@ -2472,6 +2631,10 @@ RecompD3dPresenterError submitPresent(RecompD3dPresenter *presenter, const Recom
     /* Keep guest pixels uncorrected: gamma is display state and must not feed
        back into later draws or compound when a frame is presented twice. */
     SDL_GPUTexture *shown = presenter->main_resolve;
+    if (presenter->smaa && presenter->smaa_pipelines[0] == nullptr && !createSmaa(presenter)) {
+        presenter->smaa = false;
+    }
+    if (presenter->smaa) shown = runSmaa(presenter, commands, shown);
     if (presenter->gamma_enabled) {
         SDL_GPUColorTargetInfo target{};
         target.texture = presenter->gamma_target;
@@ -2479,7 +2642,7 @@ RecompD3dPresenterError submitPresent(RecompD3dPresenter *presenter, const Recom
         target.store_op = SDL_GPU_STOREOP_STORE;
         if (SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(commands, &target, 1, nullptr)) {
             SDL_BindGPUGraphicsPipeline(pass, presenter->gamma_pipeline);
-            const SDL_GPUTextureSamplerBinding pixels{presenter->main_resolve, presenter->point_sampler};
+            const SDL_GPUTextureSamplerBinding pixels{shown, presenter->point_sampler};
             SDL_BindGPUFragmentSamplers(pass, 0u, &pixels, 1u);
             SDL_PushGPUFragmentUniformData(commands, 0u, presenter->gamma_ramp, sizeof presenter->gamma_ramp);
             SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
@@ -2628,6 +2791,12 @@ void releasePresenter(RecompD3dPresenter *presenter)
         if (sampler != nullptr) SDL_ReleaseGPUSampler(presenter->device, sampler);
     }
     if (presenter->gamma_pipeline != nullptr) SDL_ReleaseGPUGraphicsPipeline(presenter->device, presenter->gamma_pipeline);
+    for (SDL_GPUGraphicsPipeline *pipeline : presenter->smaa_pipelines) {
+        if (pipeline != nullptr) SDL_ReleaseGPUGraphicsPipeline(presenter->device, pipeline);
+    }
+    for (SDL_GPUTexture *texture : presenter->smaa_textures) {
+        if (texture != nullptr) SDL_ReleaseGPUTexture(presenter->device, texture);
+    }
     for (SDL_GPUTexture *texture : {presenter->gamma_target, presenter->back_buffer_copy, presenter->previous_frame,
             presenter->white_texture, presenter->white_volume, presenter->main_depth}) {
         if (texture != nullptr) SDL_ReleaseGPUTexture(presenter->device, texture);
@@ -2737,6 +2906,7 @@ RecompD3dPresenterError d3d_backend_create(const RecompD3dPresenterConfig *confi
     created->widescreen = envFlag("RECOMP_D3D_WIDESCREEN");
     created->performance_counter = envFlag("RECOMP_PERF_COUNTER");
     created->draw_log_trigger = std::getenv("RECOMP_D3D_DRAW_LOG");
+    created->smaa = envFlag("RECOMP_D3D_SMAA");
     if (const char *scale = std::getenv("RECOMP_D3D_SCALE")) {
         const float value = static_cast<float>(std::atof(scale));
         if (std::isfinite(value)) created->scale = std::clamp(value, 1.0f, 8.0f);

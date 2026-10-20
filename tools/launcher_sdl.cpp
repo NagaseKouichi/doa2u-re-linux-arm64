@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Linux launcher: pick resolution, anti-aliasing, widescreen and the intro
 // skip, remember them in private/launcher.json, then exit 0 so run_game.py
-// starts the game. Mirrors tools/launcher.ps1 without SMAA (Direct3D 11 only)
-// and with MSAA up to SDL_GPU's 8x. Adapted from the DOA3 launcher
+// starts the game. Mirrors tools/launcher.ps1, with MSAA up to SDL_GPU's 8x. Adapted from the DOA3 launcher
 // (NoRain211/doa3-re tools/launcher_sdl.cpp). Gamepad,
 // keyboard, mouse and touch all work, so it runs from Steam Game Mode.
 // Exits 1 when closed without Play.
@@ -20,18 +19,19 @@ namespace {
 // Everything is laid out on a 640x400 canvas and scaled by whole numbers,
 // so SDL's 8x8 debug font stays sharp: 2x on the Steam Deck's 1280x800.
 constexpr int kWidth = 640, kHeight = 400;
-constexpr float kRowX = 120, kRowW = 400, kRowH = 26, kFirstRowY = 128, kRowGap = 32;
-constexpr float kButtonY = kFirstRowY + 4 * kRowGap + 12, kButtonW = 194, kButtonH = 30;
+constexpr float kRowX = 120, kRowW = 400, kRowH = 26, kFirstRowY = 108, kRowGap = 32;
+constexpr float kButtonY = kFirstRowY + 5 * kRowGap + 10, kButtonW = 194, kButtonH = 30;
 
 const int kHeights[] = {480, 720, 1080, 1440, 2160};
 const int kSamples[] = {1, 2, 4, 8};
 
-enum Item { RESOLUTION, MSAA, WIDESCREEN, SKIP_INTRO, PLAY, QUIT, ITEM_COUNT };
+enum Item { RESOLUTION, MSAA, SMAA, WIDESCREEN, SKIP_INTRO, PLAY, QUIT, ITEM_COUNT };
 
 // launcher.ps1's defaults: the screen height, the most MSAA, widescreen on.
 struct Settings {
     int height = 0;
     int msaa = 8;
+    bool smaa = true;
     bool widescreen = true;
     bool skip_intro = false;
 };
@@ -62,6 +62,7 @@ Settings loadSettings(const std::string &path)
     std::string value;
     if (jsonValue(text, "height", value)) settings.height = std::atoi(value.c_str());
     if (jsonValue(text, "msaa", value)) settings.msaa = std::atoi(value.c_str());
+    if (jsonValue(text, "smaa", value)) settings.smaa = value == "true";
     if (jsonValue(text, "widescreen", value)) settings.widescreen = value == "true";
     if (jsonValue(text, "skipIntro", value)) settings.skip_intro = value == "true";
     return settings;
@@ -71,7 +72,8 @@ bool saveSettings(const std::string &path, const Settings &settings)
 {
     std::ofstream file(path, std::ios::trunc);
     file << "{\n  \"height\": " << settings.height << ",\n  \"msaa\": " << settings.msaa
-         << ",\n  \"smaa\": false,\n  \"widescreen\": " << (settings.widescreen ? "true" : "false")
+         << ",\n  \"smaa\": " << (settings.smaa ? "true" : "false")
+         << ",\n  \"widescreen\": " << (settings.widescreen ? "true" : "false")
          << ",\n  \"skipIntro\": " << (settings.skip_intro ? "true" : "false") << "\n}\n";
     return static_cast<bool>(file);
 }
@@ -92,7 +94,7 @@ SDL_FRect itemRect(int item)
 
 struct Launcher {
     SDL_Renderer *renderer = nullptr;
-    int choice[4] = {};
+    int choice[5] = {};
     int selected = PLAY;
 
     std::string valueText(int item) const
@@ -110,7 +112,7 @@ struct Launcher {
     void change(int item, int step)
     {
         static const int counts[] = {static_cast<int>(std::size(kHeights)),
-            static_cast<int>(std::size(kSamples)), 2, 2};
+            static_cast<int>(std::size(kSamples)), 2, 2, 2};
         if (item < PLAY) choice[item] = (choice[item] + counts[item] + step) % counts[item];
     }
 
@@ -156,7 +158,7 @@ struct Launcher {
         centered(56, "2 ULTIMATE", kText, 2);
         centered(82, "Native port settings", kMuted);
 
-        static const char *labels[] = {"Resolution", "Anti-aliasing", "Widescreen (16:9)", "Skip intro movies"};
+        static const char *labels[] = {"Resolution", "MSAA", "SMAA Ultra", "Widescreen (16:9)", "Skip intro movies"};
         for (int item = RESOLUTION; item < PLAY; ++item) {
             const SDL_FRect row = itemRect(item);
             const bool active = item == selected;
@@ -246,6 +248,7 @@ int main(int argc, char **argv)
         settings.height) - std::begin(kHeights)) - 1;
     launcher.choice[RESOLUTION] = std::max(0, nearest);
     launcher.choice[MSAA] = indexOf(kSamples, std::min(settings.msaa, 8), 0);
+    launcher.choice[SMAA] = settings.smaa ? 1 : 0;
     launcher.choice[WIDESCREEN] = settings.widescreen ? 1 : 0;
     launcher.choice[SKIP_INTRO] = settings.skip_intro ? 1 : 0;
 
@@ -332,6 +335,7 @@ int main(int argc, char **argv)
     if (result == 0) {
         settings.height = kHeights[launcher.choice[RESOLUTION]];
         settings.msaa = kSamples[launcher.choice[MSAA]];
+        settings.smaa = launcher.choice[SMAA] != 0;
         settings.widescreen = launcher.choice[WIDESCREEN] != 0;
         settings.skip_intro = launcher.choice[SKIP_INTRO] != 0;
         if (!saveSettings(settings_path, settings)) {
