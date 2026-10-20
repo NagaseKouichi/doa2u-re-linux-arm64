@@ -68,7 +68,7 @@ keeps running.
 ## Status
 
 > [!WARNING]
-> **0.1.1 Alpha is bring-up software.** Story, Watch and the attract demo play
+> **0.1.2 Alpha is bring-up software.** Story, Watch and the attract demo play
 > in development runs on every stage, but many modes and characters have not
 > been tried. A draw the port cannot render yet stops the game with a message
 > in the log.
@@ -188,12 +188,16 @@ ending that uses separate probe saves.
 To package a release ZIP from a clean checkout:
 
 ```powershell
-python tools/package_test.py 0.1.1-Alpha
+python tools/package_test.py 0.1.2-Alpha
+python tools/package_test.py 0.1.2-Alpha --platform macos
+python tools/package_test.py 0.1.2-Alpha --platform linux
 ```
 
-It zips committed HEAD, the pinned lifter, extract-xiso and its license, and
-the photo from `private/release-assets/`, with
-[test-release.md](docs/test-release.md) as `README.txt`.
+It zips committed HEAD, the pinned lifter and the photo from
+`private/release-assets/`. The Windows ZIP adds extract-xiso and its license
+with [test-release.md](docs/test-release.md) as `README.txt`; the macOS and
+Linux ZIPs use [test-release-macos.md](docs/test-release-macos.md) and
+[test-release-linux.md](docs/test-release-linux.md).
 
 ## Repository layout
 
