@@ -323,6 +323,8 @@ struct RecompD3dPresenter {
     SDL_GPUGraphicsPipeline *gamma_pipeline = nullptr;
     SDL_GPUTexture *gamma_target = nullptr;
 
+    // The target of the last clear or draw: a visibility test's scale.
+    BoundTarget last_bound;
     bool visibility_open = false;
     VisibilityQuery visibility_active;
     std::vector<VisibilityQuery> visibility_pending;
@@ -1563,6 +1565,7 @@ RecompD3dPresenterError submitClear(RecompD3dPresenter *presenter, const RecompD
             clear.clear_depth ? &z : nullptr, clear.clear_stencil ? &stencil : nullptr);
     }
     if (clear.clear_color) markWritten(presenter, bound);
+    presenter->last_bound = bound;
     return RECOMP_D3D_PRESENTER_OK;
 }
 
@@ -2087,6 +2090,7 @@ RecompD3dPresenterError submitDraw(RecompD3dPresenter *presenter, const RecompD3
     queueDraw(presenter, pipeline, vertices, vertex_bytes, indices, index_count, constants,
         draw.program_count != 0u, bindings, static_cast<uint8_t>(draw.depth.stencil_ref));
     markWritten(presenter, bound);
+    presenter->last_bound = bound;
     ++presenter->draw_count;
     return RECOMP_D3D_PRESENTER_OK;
 }
@@ -2871,9 +2875,6 @@ bool createResources(RecompD3dPresenter *presenter)
             presenter->index_capacity, presenter->index_used, 0u, SDL_GPU_BUFFERUSAGE_INDEX);
 }
 
-/* The bound target of the last clear or draw, for a visibility test's scale. */
-BoundTarget last_bound;
-
 RecompD3dPresenterError checkOwner(RecompD3dPresenter *presenter)
 {
     if (presenter == nullptr || presenter != active_presenter) return RECOMP_D3D_PRESENTER_NOT_INITIALIZED;
@@ -2994,17 +2995,13 @@ RecompD3dPresenterError d3d_backend_submit(RecompD3dPresenter *presenter, const 
     switch (command->type) {
     case RECOMP_D3D_PRESENTER_COMMAND_GAMMA:
         return submitGamma(presenter, command->data.gamma);
-    case RECOMP_D3D_PRESENTER_COMMAND_CLEAR: {
-        const auto error = submitClear(presenter, command->data.clear);
-        if (error == RECOMP_D3D_PRESENTER_OK) bindTarget(presenter, command->data.clear.target, last_bound);
-        return error;
-    }
+    case RECOMP_D3D_PRESENTER_COMMAND_CLEAR:
+        return submitClear(presenter, command->data.clear);
     case RECOMP_D3D_PRESENTER_COMMAND_PRESENT:
         return submitPresent(presenter, command->data.present);
     case RECOMP_D3D_PRESENTER_COMMAND_DRAW: {
         const auto start = std::chrono::steady_clock::now();
         const auto error = submitDraw(presenter, command->data.draw);
-        if (error == RECOMP_D3D_PRESENTER_OK) bindTarget(presenter, command->data.draw.target, last_bound);
         if (presenter->draw_log_active) {
             logDraw(presenter, command->data.draw, error, std::chrono::duration<double, std::micro>(
                 std::chrono::steady_clock::now() - start).count());
@@ -3014,7 +3011,7 @@ RecompD3dPresenterError d3d_backend_submit(RecompD3dPresenter *presenter, const 
     case RECOMP_D3D_PRESENTER_COMMAND_VISIBILITY_BEGIN:
         return beginVisibility(presenter);
     case RECOMP_D3D_PRESENTER_COMMAND_VISIBILITY_END: {
-        BoundTarget last = last_bound;
+        BoundTarget last = presenter->last_bound;
         if (last.host_width == 0u) {
             last.scale_x = static_cast<float>(mainWidth(presenter)) / presenter->config.width;
             last.scale_y = static_cast<float>(mainHeight(presenter)) / presenter->config.height;
@@ -3232,7 +3229,6 @@ RecompD3dPresenterError d3d_backend_destroy(RecompD3dPresenter **presenter)
     if (destroyed->precompile.joinable()) destroyed->precompile.join();
     releasePresenter(destroyed);
     delete destroyed;
-    last_bound = {};
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     return RECOMP_D3D_PRESENTER_OK;
 }
