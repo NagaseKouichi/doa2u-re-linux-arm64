@@ -23,9 +23,16 @@
 #include <new>
 #include <memory>
 #include <thread>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 #include <string>
+
+// mingw-w64's d3d11.h omits these Windows SDK limits.
+#ifndef D3D11_MIP_LOD_BIAS_MIN
+#define D3D11_MIP_LOD_BIAS_MIN (-16.0f)
+#define D3D11_MIP_LOD_BIAS_MAX (15.99f)
+#endif
 
 #ifdef RECOMP_SMAA
 #include "AreaTex.h"

@@ -104,15 +104,16 @@ On macOS and Linux, including the Steam Deck, follow
 **Requirements:** Windows 10/11 x64,
 [Python 3.12 or newer](https://www.python.org/downloads/windows/) on PATH,
 [CMake 3.20 or newer](https://cmake.org/download/) on PATH,
-[Visual Studio 2022 or its Build Tools](https://visualstudio.microsoft.com/downloads/)
-with **Desktop development with C++**, internet access for the first build,
-and your Disc 2 ISO with about 5 GB free.
+internet access for the first build, and your Disc 2 ISO with about 6 GB free.
+The build downloads the pinned [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
+compiler (190 MB) into `tools\llvm-mingw` and checks its SHA-256; it needs no
+Visual Studio or administrator approval.
 
 1. Download the ZIP from the
    [latest release](https://github.com/NoRain211/doa2u-re/releases/latest) and
    extract it into a new folder with a short path, such as `C:\DOA2U`.
 2. Drag your Disc 2 ISO onto `BuildGame.cmd` and wait for **Build complete**
-   (about 45 minutes). The build stops unless it reproduces the exact program
+   (about 15 minutes). The build stops unless it reproduces the exact program
    the developers tested.
 3. Run `play.cmd`, pick resolution, MSAA, SMAA, widescreen and whether to
    skip the intro movies, then press **Play**. Your choices are remembered.
@@ -160,6 +161,9 @@ the ISO unchanged. Only that hash is published, in `tools/build_game.py`.
 After a runtime change, `python tools/build_game.py --build-only` reuses the
 authenticated lift; `--lift-only` generates without building. Generated C,
 receipts and logs stay in `private/`.
+The lift reads the committed function list in `tools/doa2u/functions`;
+`--disassemble` rebuilds that list from the executable (about 25 minutes)
+after a change to `tools/doa2u/seed_functions.json` or the lifter pin.
 
 `run_game.py` takes the launcher's settings as switches, and
 `--seconds <n>` runs a bounded probe instead of `--play`:

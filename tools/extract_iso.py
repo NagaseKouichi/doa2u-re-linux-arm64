@@ -23,15 +23,20 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def run_logged(args, log_path, cwd=None):
-    print(f"{log_path.stem}... (log: {log_path})", flush=True)
+def run_logged(args, log_path, cwd=None, on_line=None):
+    """Run a tool into its log; echo each line, or call on_line instead."""
+    if on_line is None:
+        print(f"{log_path.stem}... (log: {log_path})", flush=True)
     with log_path.open("xb") as log:
         with subprocess.Popen([str(arg) for arg in args], cwd=cwd,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
             for line in process.stdout:
                 log.write(line)
                 log.flush()
-                print(line.decode("utf-8", errors="replace"), end="", flush=True)
+                if on_line is None:
+                    print(line.decode("utf-8", errors="replace"), end="", flush=True)
+                else:
+                    on_line()
             code = process.wait()
         if code:
             raise subprocess.CalledProcessError(code, args)

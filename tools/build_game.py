@@ -8,9 +8,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import uuid
 
 from extract_iso import extract, run_logged, sha256
+from build_prerequisites import llvm_mingw
 
 ROOT = Path(__file__).resolve().parents[1]
 LIFTER = ROOT / "tools/xboxrecomp"
@@ -18,9 +21,80 @@ XBE_SHA256 = "30d5bd3ff363afb72ea4d5058537013e284df0930f1921d345aeaf44af288a0c"
 CAPSTONE = "5.0.7"
 PILLOW = "12.2.0"  # run_game.py builds the dedication card with it
 # The generated program the runtime was validated against. Changing the lifter
-# pin or tools/doa2u/seed_functions.json changes it; regenerate and update both.
+# pin or the function list in tools/doa2u/functions changes it; regenerate and update both.
 PROGRAM_SHA256 = "5f43bf496a7b2e22c66598ed75eda161220eb420b55e833e5f3e70ce84ad1760"
 PROGRAM_EBP = 0
+# The disassembler's function list, minus call edges the lift does not need, so players skip disassembly.
+FUNCTIONS = ROOT / "tools/doa2u/functions"
+# Seconds and output lines each step took in the validated build; they pace the progress bar.
+# The build starts every generated file at once, so the compile advances by time alone.
+STEPS = {"xbe-parser": (5, 253), "disasm": (1440, 33), "lift": (315, 55),
+         "configure": (30, 20), "build": (245, 0)}
+LABELS = {"xbe-parser": "Reading the executable", "disasm": "Disassembling",
+          "lift": "Translating to C", "configure": "Configuring", "build": "Compiling"}
+
+
+def build_fraction(plan, finished, lines, elapsed):
+    """Share of the planned steps done: finished ones plus the current one's output or time."""
+    total = sum(STEPS[step][0] for step in plan)
+    done = sum(STEPS[step][0] for step in plan[:finished])
+    if finished < len(plan):
+        seconds, expected = STEPS[plan[finished]]
+        # Time alone stops short of the step's end, so a slower PC waits on real output.
+        share = min(elapsed / seconds, 0.95)
+        done += seconds * min(max(lines / expected, share) if expected else share, 0.99)
+    return done / total
+
+
+class Progress:
+    """One console bar across the build steps; each step's output still goes to its log."""
+
+    def __init__(self, plan):
+        self.plan, self.finished, self.lines = plan, 0, 0
+        self.start = self.step_start = time.monotonic()
+
+    def draw(self):
+        now = time.monotonic()
+        share = build_fraction(self.plan, self.finished, self.lines, now - self.step_start)
+        label = LABELS[self.plan[min(self.finished, len(self.plan) - 1)]]
+        minutes, seconds = divmod(int(now - self.start), 60)
+        print(f"\r[{'#' * int(share * 30):<30}] {share:4.0%}  {label:<22} {minutes:02d}:{seconds:02d} elapsed",
+              end="", flush=True)
+
+    def count_line(self):
+        self.lines += 1
+
+    def tick(self, stop):
+        while not stop.wait(1):
+            self.draw()
+
+    def run(self, args, log_path, cwd=None):
+        if sys.stdout.isatty():
+            self.run_with_bar(args, log_path, cwd)
+        else:
+            run_logged(args, log_path, cwd)
+            self.finished += 1
+
+    def run_with_bar(self, args, log_path, cwd):
+        stop = threading.Event()
+        ticker = threading.Thread(target=self.tick, args=(stop,), daemon=True)
+        self.draw()
+        ticker.start()
+        try:
+            run_logged(args, log_path, cwd, on_line=self.count_line)
+        except subprocess.CalledProcessError:
+            stop.set()
+            ticker.join()
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+            print(f"\n{LABELS[self.plan[self.finished]]} failed. The end of {log_path}:", *tail, sep="\n")
+            raise
+        finally:
+            stop.set()
+            ticker.join()
+        self.finished, self.lines, self.step_start = self.finished + 1, 0, time.monotonic()
+        self.draw()
+        if self.finished == len(self.plan):
+            print()
 
 
 def selected_xbe():
@@ -45,11 +119,10 @@ def use_windows_newlines(generated):
 
 
 def runner_path(root=ROOT):
-    """MSVC's multi-config build puts the runner under Release; Ninja does not."""
-    build_dir = root / "build/recomp-program"
+    """The Windows runner builds with llvm-mingw in its own folder, so an old MSVC cache cannot clash."""
     if sys.platform == "win32":
-        return build_dir / "Release/recomp_program_runner.exe"
-    return build_dir / "recomp_program_runner"
+        return root / "build/recomp-program-mingw/recomp_program_runner.exe"
+    return root / "build/recomp-program/recomp_program_runner"
 
 
 def program_manifest(generated):
@@ -72,6 +145,25 @@ def lifter_revision():
     if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=LIFTER):
         raise ValueError("Commit lifter changes and update its pin before generating")
     return revision
+
+
+def merge_functions(path):
+    """Join the committed function shards into the lifter's functions.json."""
+    functions = [entry for shard in sorted(FUNCTIONS.glob("*.json"))
+                 for entry in json.loads(shard.read_text(encoding="utf-8"))]
+    path.write_text(json.dumps(functions), encoding="utf-8")
+
+
+def write_functions(disasm):
+    """Replace the committed shards with a fresh disassembly, under the public file-size limit."""
+    functions = json.loads((disasm / "functions.json").read_text(encoding="utf-8"))
+    for old in FUNCTIONS.glob("*.json"):
+        old.unlink()
+    for index in range(0, len(functions), 1000):
+        rows = [json.dumps({k: v for k, v in entry.items() if k not in ("calls_to", "called_by")})
+                for entry in functions[index:index + 1000]]
+        (FUNCTIONS / f"{index // 1000:02d}.json").write_text(
+            "[\n" + ",\n".join(rows) + "\n]\n", encoding="utf-8", newline="\n")
 
 
 def import_disc(iso, extractor=None):
@@ -101,7 +193,7 @@ def import_disc(iso, extractor=None):
     raise ValueError("This build supports only Dead or Alive Ultimate (Xbox, USA) Disc 2")
 
 
-def build(build_only=False, lift_only=False, iso=None, extractor=None):
+def build(build_only=False, lift_only=False, iso=None, disassemble=False, extractor=None):
     windows = sys.platform == "win32"
     if iso is not None:
         import_disc(iso, extractor)
@@ -124,18 +216,31 @@ def build(build_only=False, lift_only=False, iso=None, extractor=None):
             subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
             if missing[0].startswith("capstone") and "capstone" in sys.modules:
                 raise ValueError(f"Updated Capstone to {CAPSTONE}; run the build again")
+    # Fetch the compiler before the long lift, so a failed download stops early.
+    compiler = llvm_mingw(ROOT) if windows and not lift_only else None
     import capstone
     xbe = selected_xbe()
     revision = lifter_revision()
-    seeds = ROOT / "tools/doa2u/seed_functions.json"
-    recipe = dict(xbe_sha256=sha256(xbe), lifter_commit=revision, capstone=capstone.__version__,
-                  seed_functions_sha256=sha256(seeds))
     work = ROOT / "private/program"
     work.mkdir(parents=True, exist_ok=True)
     logs = ROOT / "private/build-logs" / uuid.uuid4().hex[:8]
     logs.mkdir(parents=True)
-    generated, disasm = work / "generated", work / "disasm"
+    generated, disasm, functions = work / "generated", work / "disasm", work / "functions.json"
     receipt_path = work / "receipt.json"
+    lift = [] if build_only else ["xbe-parser", "disasm", "lift"] if disassemble else ["lift"]
+    progress = Progress(lift + ([] if lift_only else ["configure", "build"]))
+    if disassemble:
+        analysis = work / "analysis.json"
+        progress.run([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
+                     logs / "xbe-parser.log", LIFTER)
+        progress.run([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
+                      "--analysis-json", analysis,
+                      "--seed-functions", ROOT / "tools/doa2u/seed_functions.json"],
+                     logs / "disasm.log", LIFTER)
+        write_functions(disasm)
+    merge_functions(functions)
+    recipe = dict(xbe_sha256=sha256(xbe), lifter_commit=revision, capstone=capstone.__version__,
+                  functions_sha256=sha256(functions))
     if build_only:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if receipt["recipe"] != recipe:
@@ -143,14 +248,9 @@ def build(build_only=False, lift_only=False, iso=None, extractor=None):
         if program_manifest(generated) != (receipt["manifest_sha256"], receipt["ebp_count"]):
             raise ValueError("Generated program differs from its authenticated receipt")
     else:
-        analysis = work / "analysis.json"
-        run_logged([sys.executable, "-u", "-m", "tools.xbe_parser", xbe, "--json", analysis],
-                   logs / "xbe-parser.log", LIFTER)
-        run_logged([sys.executable, "-u", "-m", "tools.disasm", xbe, "-o", disasm,
-                    "--analysis-json", analysis, "--seed-functions", seeds],
-                   logs / "disasm.log", LIFTER)
-        run_logged([sys.executable, "-u", "-m", "tools.recomp", xbe, "--all", "--split", "1000",
-                    "--game-name", "Dead or Alive 2 Ultimate", "--disasm-dir", disasm,
+        progress.run([sys.executable, "-u", "-m", "tools.recomp", xbe, "--all", "--split", "1000",
+                    "--game-name", "Dead or Alive 2 Ultimate", "--disasm-dir", work / "none",
+                    "--functions", functions,
                     "--func-id-dir", work / "none", "--abi-dir", work / "none",
                     "--icall-sites", work / "none.json", "--gen-dir", generated,
                     "--output-dir", work / "metadata"], logs / "lift.log", LIFTER)
@@ -162,20 +262,25 @@ def build(build_only=False, lift_only=False, iso=None, extractor=None):
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     if lift_only:
         return
-    build_dir = ROOT / "build/recomp-program"
-    generator = ["-A", "x64"] if windows else ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
+    build_dir = runner_path().parent
+    if windows:
+        generator = ["-G", "MinGW Makefiles", "-DCMAKE_BUILD_TYPE=Release",
+                     f"-DCMAKE_C_COMPILER={compiler.as_posix()}",
+                     f"-DCMAKE_CXX_COMPILER={compiler.with_name('clang++.exe').as_posix()}"]
+    else:
+        generator = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
     if sys.platform.startswith("linux"):
         generator.append("-DRECOMP_FETCH_SDL3=ON")  # used only when the system has no SDL3
-    run_logged(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, *generator,
+    progress.run(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, *generator,
                 f"-DRECOMP_PROGRAM_DIR={generated.as_posix()}",
                 f"-DRECOMP_XBE_SHA256={recipe['xbe_sha256']}",
                 f"-DRECOMP_PROGRAM_MANIFEST_SHA256={receipt['manifest_sha256']}",
                 f"-DRECOMP_PROGRAM_EBP_EXPECTED={receipt['ebp_count']}"], logs / "configure.log")
     # Linux builds the settings launcher beside the runner; SteamOS has no compiler.
     targets = ["recomp_program_runner"] + (["recomp_launcher"] if sys.platform.startswith("linux") else [])
-    # Generated chunks are large; more jobs than this can exhaust memory.
-    jobs = str(4 if windows else min(4, os.cpu_count() or 1))
-    run_logged(["cmake", "--build", build_dir, "--config", "Release", "--parallel", jobs,
+    # Generated chunks are large; outside Windows more jobs than this can exhaust memory.
+    jobs = str(os.cpu_count() or 4) if windows else str(min(4, os.cpu_count() or 1))
+    progress.run(["cmake", "--build", build_dir, "--parallel", jobs,
                 "--target", *targets], logs / "build.log")
     receipt["runner_sha256"] = sha256(runner_path())
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
@@ -188,10 +293,12 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--build-only", action="store_true", help="Rebuild authenticated generated sources")
     modes.add_argument("--lift-only", action="store_true", help="Generate without building the runner")
+    modes.add_argument("--disassemble", action="store_true",
+                       help="Rewrite tools/doa2u/functions from a fresh disassembly, then build")
     parser.add_argument("--extractor", help="extract-xiso to use instead of the one on PATH")
     args = parser.parse_args()
     try:
-        build(args.build_only, args.lift_only, args.iso, args.extractor)
+        build(args.build_only, args.lift_only, args.iso, args.disassemble, args.extractor)
     except (OSError, ValueError, KeyError, ImportError, subprocess.CalledProcessError) as error:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1

@@ -27,6 +27,35 @@ src/FAudioFX_reverb.c (FNA-XNA/FAudio 26.10), Copyright (c) 2011-2024 Ethan
 Lee, Luigi Auriemma, and the MonoGame Team, under the zlib license, whose
 full text the file keeps.
 
+tools/build_prerequisites.py and its test are adapted from NoRain211/doaxbv-re
+at commit 5761e89, under GPL-3.0-or-later. The build downloads, but does not
+redistribute, the llvm-mingw compiler by Martin Storsjö and contributors.
+
+The XAudio 2.9 I3DL2 reverb conversion in recomp-runtime/xaudio2_reverb.h is
+altered from FAudio (FNA-XNA/FAudio, ReverbConvertI3DL2ToNative9 in
+src/FAudioFX_reverb.c at 6839b88e304a046ae1a609ff14a085371e02a4e0), under
+the zlib license:
+
+Copyright (c) 2011-2024 Ethan Lee, Luigi Auriemma, and the MonoGame Team
+
+This software is provided 'as-is', without any express or implied warranty.
+In no event will the authors be held liable for any damages arising from
+the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+claim that you wrote the original software. If you use this software in a
+product, an acknowledgment in the product documentation would be
+appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
+
 Dead or Alive, Xbox, and related names and marks belong to their respective
 owners. This project is not affiliated with or endorsed by those owners.
 

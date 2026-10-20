@@ -148,7 +148,7 @@ foreach ($enabled in @($true, $false)) {
 
     def test_runner_path_follows_the_build_generator(self):
         root = Path("/checkout")
-        expected = ("build/recomp-program/Release/recomp_program_runner.exe" if os.name == "nt"
+        expected = ("build/recomp-program-mingw/recomp_program_runner.exe" if os.name == "nt"
             else "build/recomp-program/recomp_program_runner")
         self.assertEqual(runner_path(root), root / expected)
 
@@ -203,6 +203,20 @@ foreach ($enabled in @($true, $false)) {
             with self.assertRaises(FileExistsError):
                 prepare_disc(source, disc)
             self.assertFalse(disc.exists())
+
+    def test_failed_hardlink_explains_the_drive_and_removes_staging(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, disc = root / "source", root / "play"
+            source.mkdir()
+            (source / "payload.txt").write_text("synthetic content")
+            error = OSError(1, "Incorrect function")
+            with patch("run_game.os.link", side_effect=error), \
+                    self.assertRaisesRegex(ValueError, "NTFS"):
+                prepare_disc(source, disc)
+            self.assertFalse((root / "play.tmp").exists())
+            prepare_disc(source, disc)
+            self.assertTrue((source / "payload.txt").samefile(disc / "payload.txt"))
 
     def test_seeds_hdd_cache_with_copies_and_replaces_partial_archives(self):
         with tempfile.TemporaryDirectory() as folder:

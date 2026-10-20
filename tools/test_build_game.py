@@ -6,11 +6,40 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build_game import import_disc, lifter_revision, program_manifest, selected_xbe, use_windows_newlines
+from build_game import (STEPS, build_fraction, import_disc, lifter_revision, merge_functions,
+                        program_manifest, selected_xbe, use_windows_newlines, write_functions)
 from extract_iso import sha256
 
 
 class BuildTests(unittest.TestCase):
+    def test_function_shards_round_trip_without_call_edges(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            functions = [{"start": hex(i), "calls_to": [], "called_by": ["0x1"]} for i in range(2500)]
+            (root / "functions.json").write_text(json.dumps(functions))
+            (root / "shards").mkdir()
+            (root / "shards/99.json").write_text("[]")
+            with patch("build_game.FUNCTIONS", root / "shards"):
+                write_functions(root)
+                merge_functions(root / "merged.json")
+            self.assertEqual(sorted(p.name for p in (root / "shards").iterdir()), ["00.json", "01.json", "02.json"])
+            self.assertEqual(json.loads((root / "merged.json").read_text()), [{"start": hex(i)} for i in range(2500)])
+
+    def test_progress_counts_finished_steps_then_output_or_time(self):
+        plan = list(STEPS)
+        total = sum(seconds for seconds, _ in STEPS.values())
+        self.assertEqual(build_fraction(plan, 0, 0, 0), 0)
+        # Half the lift's output after the parser and disassembly.
+        self.assertAlmostEqual(build_fraction(plan, 2, 27, 0), (5 + 1440 + 315 * 27 / 55) / total)
+        # A silent, slow disassembly moves by time but stops short of its end.
+        self.assertAlmostEqual(build_fraction(plan, 1, 0, 10**6), (5 + 1440 * 0.95) / total)
+        self.assertAlmostEqual(build_fraction(plan, 1, 500, 0), (5 + 1440 * 0.99) / total)
+        self.assertEqual(build_fraction(plan, len(plan), 0, 0), 1)
+        self.assertEqual(build_fraction(["configure", "build"], 1, 0, 0), 30 / 275)
+        # The compiler's up-front file list does not move the bar.
+        self.assertEqual(build_fraction(["build"], 0, 109, 0), 0)
+        self.assertAlmostEqual(build_fraction(["build"], 0, 0, 10**6), 0.95)
+
     def test_manifest_authenticates_members_and_contents(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
