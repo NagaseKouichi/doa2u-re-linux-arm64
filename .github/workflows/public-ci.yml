@@ -55,4 +55,5 @@ jobs:
       - name: Run public runtime tests
         env:
           SDL_VIDEO_DRIVER: offscreen
+          RECOMP_TEST_SOFTWARE_VULKAN: "1"
         run: ctest --test-dir build/recomp-runtime --output-on-failure
