@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build_game import import_disc, lifter_revision, program_manifest, selected_xbe
+from build_game import import_disc, lifter_revision, program_manifest, selected_xbe, use_windows_newlines
 from extract_iso import sha256
 
 
@@ -24,6 +24,18 @@ class BuildTests(unittest.TestCase):
             (root / "recomp_0002.c").write_text("/* gap */\n")
             with self.assertRaises(ValueError):
                 program_manifest(root)
+
+    def test_generated_files_get_the_windows_line_endings_the_manifest_pins(self):
+        with tempfile.TemporaryDirectory() as folder:
+            generated = Path(folder)
+            (generated / "recomp_0000.c").write_bytes(b"a\nb\r\nc\n")
+            with patch("build_game.sys.platform", "darwin"):
+                use_windows_newlines(generated)
+            self.assertEqual((generated / "recomp_0000.c").read_bytes(), b"a\r\nb\r\nc\r\n")
+            (generated / "recomp_0000.c").write_bytes(b"a\n")
+            with patch("build_game.sys.platform", "win32"):
+                use_windows_newlines(generated)
+            self.assertEqual((generated / "recomp_0000.c").read_bytes(), b"a\n")
 
     def test_target_hash_and_private_boundary(self):
         with tempfile.TemporaryDirectory() as folder:

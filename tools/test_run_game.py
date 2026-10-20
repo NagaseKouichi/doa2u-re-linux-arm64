@@ -8,7 +8,7 @@ import os
 import subprocess
 from unittest.mock import Mock, patch
 
-from run_game import prepare_disc, run, runner_path, seed_hdd_cache
+from run_game import prepare_disc, run, runner_path, saved_settings, seed_hdd_cache
 
 
 class DiscTests(unittest.TestCase):
@@ -128,6 +128,29 @@ foreach ($enabled in @($true, $false)) {
                                                "--input-analog-pulse-at", "4600", "1"])
             self.assertEqual(save.read_text(), "user save")
             self.assertFalse((root / "private/probe-disc/.recomp-storage").exists())
+
+    def test_saved_settings_read_the_launcher_choices_and_skip_invalid_ones(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "private").mkdir()
+            settings = root / "private/launcher.json"
+            with patch("run_game.ROOT", root):
+                self.assertEqual(saved_settings(), {})
+                settings.write_text(json.dumps({"height": 1080, "msaa": 4, "smaa": False,
+                    "widescreen": True, "skipIntro": True}), encoding="utf-8")
+                self.assertEqual(saved_settings(), {"resolution": 1080, "msaa": 4, "smaa": False,
+                    "widescreen": True, "skip_intro": True})
+                settings.write_text(json.dumps({"height": 900, "msaa": 3, "widescreen": "yes"}),
+                    encoding="utf-8")
+                self.assertEqual(saved_settings(), {})
+                settings.write_text("{", encoding="utf-8")
+                self.assertEqual(saved_settings(), {})
+
+    def test_runner_path_follows_the_build_generator(self):
+        root = Path("/checkout")
+        expected = ("build/recomp-program/Release/recomp_program_runner.exe" if os.name == "nt"
+            else "build/recomp-program/recomp_program_runner")
+        self.assertEqual(runner_path(root), root / expected)
 
     def test_rejects_invalid_start_polls_before_reading_inputs(self):
         for polls in ([0], [-1], [2**64], [1, 2, 3, 4, 5]):

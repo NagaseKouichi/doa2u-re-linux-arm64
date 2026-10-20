@@ -1030,6 +1030,7 @@ ShaderPair lookupShaders(RecompD3dPresenter *presenter, const RecompD3dDrawShade
         const auto found = presenter->shaders.find(key);
         if (found != presenter->shaders.end()) return found->second;
     }
+    const auto start = std::chrono::steady_clock::now();
     ShaderPair pair;
     std::string hlsl;
     if (recomp_d3d_draw_shader_source(draw_key, pair.layout, hlsl)) {
@@ -1053,6 +1054,11 @@ ShaderPair lookupShaders(RecompD3dPresenter *presenter, const RecompD3dDrawShade
         std::fprintf(stderr, "recomp d3d presenter: vertex program untranslated fvf=%03x count=%u\n",
             draw_key.fvf, draw_key.program_count);
     }
+    std::fprintf(stderr, "recomp d3d presenter: draw shader fvf=0x%03X program=%u%s%s in %lld ms\n",
+        draw_key.fvf, draw_key.program_count, count_pass ? " count" : "",
+        pair.vertex != nullptr ? "" : " failed",
+        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count()));
     std::lock_guard<std::mutex> lock(presenter->shader_lock);
     const auto inserted = presenter->shaders.emplace(key, pair);
     if (!inserted.second) {
@@ -1303,7 +1309,14 @@ SDL_GPUGraphicsPipeline *lookupPipeline(RecompD3dPresenter *presenter, const Pip
     info.vertex_input_state.num_vertex_attributes =
         vertexAttributes(state.shaders.layout, state.coverage_only, attributes);
 
+    const auto start = std::chrono::steady_clock::now();
     SDL_GPUGraphicsPipeline *pipeline = SDL_CreateGPUGraphicsPipeline(presenter->device, &info);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    if (ms >= 20) {
+        std::fprintf(stderr, "recomp d3d presenter: slow pipeline fvf=0x%03X in %lld ms (%zu cached)\n",
+            state.fvf, static_cast<long long>(ms), presenter->pipelines.size());
+    }
     if (pipeline == nullptr) {
         std::fprintf(stderr, "recomp d3d presenter: draw pipeline fvf=0x%08X failed: %s\n",
             state.fvf, SDL_GetError());
