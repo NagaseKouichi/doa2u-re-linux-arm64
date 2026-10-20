@@ -95,9 +95,10 @@ around bright surfaces as on the Xbox, which reads more strongly on a sharp
 **Requirements:** Windows 10/11 x64,
 [Python 3.12 or newer](https://www.python.org/downloads/windows/) on PATH,
 [CMake 3.20 or newer](https://cmake.org/download/) on PATH,
-[Visual Studio 2022 or its Build Tools](https://visualstudio.microsoft.com/downloads/)
-with **Desktop development with C++**, internet access for the first build,
-and your Disc 2 ISO with about 6 GB free.
+internet access for the first build, and your Disc 2 ISO with about 6 GB free.
+The build downloads the pinned [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
+compiler (190 MB) into `tools\llvm-mingw` and checks its SHA-256; it needs no
+Visual Studio or administrator approval.
 
 1. Download the ZIP from the
    [latest release](https://github.com/NoRain211/doa2u-re/releases/latest) and

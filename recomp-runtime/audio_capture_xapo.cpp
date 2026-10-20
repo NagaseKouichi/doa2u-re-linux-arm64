@@ -1,5 +1,18 @@
 #include "audio_capture_xapo.h"
 
+#if defined(__MINGW32__)
+// shortcut: mingw-w64 has no CXAPOBase, so recording needs an MSVC build; implement IXAPO directly to record from llvm-mingw builds.
+#include <cstdio>
+#include <cstdlib>
+
+void recomp_audio_capture_attach(IXAudio2MasteringVoice *)
+{
+    const char *path = std::getenv("RECOMP_AUDIO_CAPTURE");
+    if (path && *path) std::fprintf(stderr, "[audio-capture] unavailable in llvm-mingw builds\n");
+}
+
+void recomp_audio_capture_save(void) {}
+#else
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <xaudio2.h>
@@ -118,3 +131,4 @@ void recomp_audio_capture_save(void)
     capture_file = nullptr;
     capture->Release(); capture = nullptr;
 }
+#endif

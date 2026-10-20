@@ -4,6 +4,7 @@
 #include "device_model.h"
 #include "symbolic_link_model.h"
 #include "save_transaction.h"
+#include "stop_report.h"
 
 #include <ctype.h>
 #include <stddef.h>

@@ -1540,7 +1540,8 @@ static void submit_draw(uint32_t primitive, uint32_t count, uint32_t vertices,
         }
         if (nonfinite != 0u) {
             static uint32_t dropped;
-            if ((++dropped & (dropped - 1u)) == 0u)
+            ++dropped;
+            if ((dropped & (dropped - 1u)) == 0u)
                 fprintf(stderr, "recomp d3d8: dropped nonfinite-position draws=%u cells=%u ret=%08x\n",
                     dropped, nonfinite, *recomp_memory_u32(recomp_runtime.registers.esp));
             free(sequential);

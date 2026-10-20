@@ -29,6 +29,8 @@
     "xbe/**",
     "tools/build_game.py",
     "tools/test_build_game.py",
+    "tools/build_prerequisites.py",
+    "tools/test_build_prerequisites.py",
     "tools/package_test.py",
     "tools/run_game.py",
     "tools/dedication_card.py",

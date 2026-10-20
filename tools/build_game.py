@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import time
 import uuid
 
 from extract_iso import extract, run_logged, sha256
+from build_prerequisites import llvm_mingw
 
 ROOT = Path(__file__).resolve().parents[1]
 LIFTER = ROOT / "tools/xboxrecomp"
@@ -193,6 +195,8 @@ def build(build_only=False, lift_only=False, iso=None, disassemble=False):
             subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
             if missing[0].startswith("capstone") and "capstone" in sys.modules:
                 raise ValueError(f"Updated Capstone to {CAPSTONE}; run the build again")
+    # Fetch the compiler before the long lift, so a failed download stops early.
+    compiler = None if lift_only else llvm_mingw(ROOT)
     import capstone
     xbe = selected_xbe()
     revision = lifter_revision()
@@ -236,15 +240,17 @@ def build(build_only=False, lift_only=False, iso=None, disassemble=False):
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     if lift_only:
         return
-    build_dir = ROOT / "build/recomp-program"
-    progress.run(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, "-A", "x64",
+    build_dir = ROOT / "build/recomp-program-mingw"
+    progress.run(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, "-G", "MinGW Makefiles",
+                "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_C_COMPILER={compiler.as_posix()}",
+                f"-DCMAKE_CXX_COMPILER={compiler.with_name('clang++.exe').as_posix()}",
                 f"-DRECOMP_PROGRAM_DIR={generated.as_posix()}",
                 f"-DRECOMP_XBE_SHA256={recipe['xbe_sha256']}",
                 f"-DRECOMP_PROGRAM_MANIFEST_SHA256={receipt['manifest_sha256']}",
                 f"-DRECOMP_PROGRAM_EBP_EXPECTED={receipt['ebp_count']}"], logs / "configure.log")
-    progress.run(["cmake", "--build", build_dir, "--config", "Release", "--parallel", "4",
+    progress.run(["cmake", "--build", build_dir, "--parallel", str(os.cpu_count() or 4),
                 "--target", "recomp_program_runner"], logs / "build.log")
-    receipt["runner_sha256"] = sha256(build_dir / "Release/recomp_program_runner.exe")
+    receipt["runner_sha256"] = sha256(build_dir / "recomp_program_runner.exe")
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 

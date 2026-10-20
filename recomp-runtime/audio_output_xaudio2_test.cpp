@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <xaudio2.h>
-#include <xaudio2fx.h>
+#include "xaudio2_reverb.h"
 
 #include <atomic>
 #include <cmath>

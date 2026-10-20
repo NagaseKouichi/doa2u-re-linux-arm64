@@ -10,11 +10,9 @@ What you need (Windows 10 or 11, 64-bit):
 - Python 3.12 or newer: https://www.python.org/downloads/windows/
   (tick "Add python.exe to PATH").
 - CMake 3.20 or newer: https://cmake.org/download/ (add it to PATH).
-- Visual Studio 2022 or newer, or its Build Tools, with the
-  "Desktop development with C++" workload:
-  https://visualstudio.microsoft.com/downloads/
-- An internet connection for the first build (it downloads SDL3, SMAA
-  and the Capstone and Pillow Python packages).
+- An internet connection for the first build (it downloads the llvm-mingw
+  compiler, SDL3, SMAA and the Capstone and Pillow Python packages). No
+  Visual Studio is needed.
 - Your Disc 2 as an Xbox ISO, and about 6 GB of free space on the drive
   holding this folder.
 
