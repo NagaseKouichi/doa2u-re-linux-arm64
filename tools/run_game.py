@@ -88,9 +88,13 @@ def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), a
     if len(analog_polls) > 1024 or any(poll <= 0 or poll > 2**64 - 1 or index < 0 or index > 7
                                       for poll, index in analog_polls):
         raise ValueError("Analog polls require positive uint64 polls and indices 0..7, at most 1024")
+    receipt_path = ROOT / "private/program/receipt.json"
+    if not receipt_path.is_file():
+        raise ValueError('The game is not built yet. Drag your Disc 2 ISO onto BuildGame.cmd '
+                         'and wait for "Build complete"; if it says "Build failed", report that line')
     selected = selected_xbe()
     generated = ROOT / "private/program/generated"
-    receipt = json.loads((ROOT / "private/program/receipt.json").read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if receipt["recipe"]["xbe_sha256"] != sha256(selected) or program_manifest(generated) != (
             receipt["manifest_sha256"], receipt["ebp_count"]):
         raise ValueError("Game or generated sources differ from the build receipt")
