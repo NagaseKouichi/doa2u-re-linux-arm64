@@ -13,6 +13,19 @@ import struct
 FONT_SHA256 = "da6b43697b1baa3dbc97e801d86469af2071c20a2ef0a7912cc45e4c976760e7"
 FONT_ROWS = ("ABCDEFGHIJ", "KLMNOPQRS", "TUVWXYZ")
 WIDTH, HEIGHT, S = 3840, 2160, 3  # S: card units are 1280x720
+# Pillow matches font filenames exactly: Windows Georgia, macOS Georgia, then common Linux serifs.
+SERIF = ("georgia.ttf", "Georgia.ttf", "DejaVuSerif.ttf", "LiberationSerif-Regular.ttf")
+SERIF_ITALIC = ("georgiai.ttf", "Georgia Italic.ttf", "DejaVuSerif-Italic.ttf", "LiberationSerif-Italic.ttf",
+                "DejaVuSerif.ttf")
+
+
+def load_font(image_font, names, size):
+    for name in names:
+        try:
+            return image_font.truetype(name, size)
+        except OSError:
+            pass
+    return image_font.load_default(size)
 
 
 def morton_tables(width, height):
@@ -156,13 +169,13 @@ def build(disc_root, photo, output):
     caps("TOMONOBU", 118, top + 48)
     caps("ITAGAKI", 118, top + 108)
     draw = ImageDraw.Draw(card)
-    font = lambda size, name="georgia.ttf": ImageFont.truetype(name, size * S)
+    font = lambda size, names=SERIF: load_font(ImageFont, names, size * S)
     def center(text, face, y, fill):
         draw.text((cx - draw.textlength(text, font=face) / 2, y * S), text, font=face, fill=fill)
     center("In Memory of", font(28), top, (175, 175, 175))
     draw.line((cx - 60 * S, (top + 168) * S, cx + 60 * S, (top + 168) * S), fill=(120, 30, 30), width=2 * S)
     center("1967 \u2013 2025", font(28), top + 182, (175, 175, 175))
-    center("Creator of Dead or Alive", font(24, "georgiai.ttf"), top + 228, (150, 150, 150))
+    center("Creator of Dead or Alive", font(24, SERIF_ITALIC), top + 228, (150, 150, 150))
     partial = Path(output).with_suffix(".tmp")
     card.save(partial, "BMP")
     partial.replace(output)
