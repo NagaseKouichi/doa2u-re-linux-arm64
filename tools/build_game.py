@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,6 +33,25 @@ def selected_xbe():
     return xbe
 
 
+def use_windows_newlines(generated):
+    """PROGRAM_SHA256 authenticates the lifter's Windows output, which Python
+    writes with CRLF line endings; other hosts write LF, so match those bytes."""
+    if sys.platform == "win32":
+        return
+    for path in generated.iterdir():
+        if path.is_file():
+            data = path.read_bytes()
+            path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+
+def runner_path(root=ROOT):
+    """MSVC's multi-config build puts the runner under Release; Ninja does not."""
+    build_dir = root / "build/recomp-program"
+    if sys.platform == "win32":
+        return build_dir / "Release/recomp_program_runner.exe"
+    return build_dir / "recomp_program_runner"
+
+
 def program_manifest(generated):
     chunks = sorted(generated.glob("recomp_[0-9][0-9][0-9][0-9].c"))
     if not chunks or [p.name for p in chunks] != [f"recomp_{i:04d}.c" for i in range(len(chunks))]:
@@ -54,7 +74,7 @@ def lifter_revision():
     return revision
 
 
-def import_disc(iso):
+def import_disc(iso, extractor=None):
     """Extract a user's ISO once into private/imported-disc and select its game executable."""
     if not iso.is_file():
         raise ValueError("Drag your Dead or Alive Ultimate Disc 2 ISO onto BuildGame.cmd")
@@ -70,7 +90,7 @@ def import_disc(iso):
             print(f"Removing the unfinished extraction in {imported}", flush=True)
             shutil.rmtree(imported)
         bundled = ROOT / "tools/artifacts/extract-xiso.exe"
-        extract(iso, imported, bundled if bundled.is_file() else "extract-xiso")
+        extract(iso, imported, extractor or (bundled if bundled.is_file() else "extract-xiso"))
     for xbe in sorted((imported / "disc").glob("*.xbe")):
         if sha256(xbe) == XBE_SHA256:
             path = ROOT / "private/target.json"
@@ -81,11 +101,14 @@ def import_disc(iso):
     raise ValueError("This build supports only Dead or Alive Ultimate (Xbox, USA) Disc 2")
 
 
-def build(build_only=False, lift_only=False, iso=None):
+def build(build_only=False, lift_only=False, iso=None, extractor=None):
+    windows = sys.platform == "win32"
     if iso is not None:
-        import_disc(iso)
+        import_disc(iso, extractor)
         if shutil.which("cmake") is None:
             raise ValueError("Install CMake 3.20 or newer and add it to PATH")
+        if not windows and shutil.which("ninja") is None:
+            raise ValueError("Install Ninja and add it to PATH")
         missing = []
         try:
             import capstone
@@ -131,6 +154,7 @@ def build(build_only=False, lift_only=False, iso=None):
                     "--func-id-dir", work / "none", "--abi-dir", work / "none",
                     "--icall-sites", work / "none.json", "--gen-dir", generated,
                     "--output-dir", work / "metadata"], logs / "lift.log", LIFTER)
+        use_windows_newlines(generated)
         manifest, ebp = program_manifest(generated)
         if iso is not None and (manifest, ebp) != (PROGRAM_SHA256, PROGRAM_EBP):
             raise ValueError(f"Generated program {manifest} differs from the validated {PROGRAM_SHA256}")
@@ -139,14 +163,21 @@ def build(build_only=False, lift_only=False, iso=None):
     if lift_only:
         return
     build_dir = ROOT / "build/recomp-program"
-    run_logged(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, "-A", "x64",
+    generator = ["-A", "x64"] if windows else ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
+    if sys.platform.startswith("linux"):
+        generator.append("-DRECOMP_FETCH_SDL3=ON")  # used only when the system has no SDL3
+    run_logged(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, *generator,
                 f"-DRECOMP_PROGRAM_DIR={generated.as_posix()}",
                 f"-DRECOMP_XBE_SHA256={recipe['xbe_sha256']}",
                 f"-DRECOMP_PROGRAM_MANIFEST_SHA256={receipt['manifest_sha256']}",
                 f"-DRECOMP_PROGRAM_EBP_EXPECTED={receipt['ebp_count']}"], logs / "configure.log")
-    run_logged(["cmake", "--build", build_dir, "--config", "Release", "--parallel", "4",
-                "--target", "recomp_program_runner"], logs / "build.log")
-    receipt["runner_sha256"] = sha256(build_dir / "Release/recomp_program_runner.exe")
+    # Linux builds the settings launcher beside the runner; SteamOS has no compiler.
+    targets = ["recomp_program_runner"] + (["recomp_launcher"] if sys.platform.startswith("linux") else [])
+    # Generated chunks are large; more jobs than this can exhaust memory.
+    jobs = str(4 if windows else min(4, os.cpu_count() or 1))
+    run_logged(["cmake", "--build", build_dir, "--config", "Release", "--parallel", jobs,
+                "--target", *targets], logs / "build.log")
+    receipt["runner_sha256"] = sha256(runner_path())
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
@@ -157,14 +188,16 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--build-only", action="store_true", help="Rebuild authenticated generated sources")
     modes.add_argument("--lift-only", action="store_true", help="Generate without building the runner")
+    parser.add_argument("--extractor", help="extract-xiso to use instead of the one on PATH")
     args = parser.parse_args()
     try:
-        build(args.build_only, args.lift_only, args.iso)
+        build(args.build_only, args.lift_only, args.iso, args.extractor)
     except (OSError, ValueError, KeyError, ImportError, subprocess.CalledProcessError) as error:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1
     if args.iso is not None:
-        print("Build complete. Double-click play.cmd to play.")
+        print("Build complete. " + ("Double-click play.cmd to play." if sys.platform == "win32"
+                                    else "Run ./launcher.sh to play."))
     return 0
 
 

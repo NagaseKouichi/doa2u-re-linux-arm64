@@ -15,6 +15,19 @@ preferences. Audio controls and sister-specific game options are omitted.
 DOA2U extends the MSAA choices through 32x and uses its authenticated Python
 launcher. Resolution presets keep the same height/480 scaling contract.
 
+The macOS and Linux ports take the host layer of committed DOA3 at `48d05e9`
+(its PR #7), which came from DOAXBV's macOS and Linux ports: `win32_compat`,
+the POSIX fiber switch, the SDL3 audio output, the scheduler and vblank waits,
+the save flushes, the path handling in `kernel_file.c` and the macOS and Linux
+launchers. DOA2U's own additions are kept on top of them: the HLSL draw shader
+and its constants move from the Direct3D 11 presenter into
+`d3d_draw_shader.cpp` so the SDL_GPU presenter compiles the same source, the
+SDL_GPU presenter follows DOA2U's Direct3D 11 backend rather than DOA3's
+(volume textures, bump and water combiners, scaled offscreen targets, depth
+bias, coverage probes and visibility counts), and the SDL audio output adds
+DOA2U's voice routing and I3DL2 reverb. The reverb network is altered from
+FAudio 26.10 under its zlib license (see NOTICE).
+
 The frame-buffer correction follows committed DOA3 fixes `bb479cf` and
 `c10423f`: constant-alpha blend decoding and the shared host-frame flag with
 a separate previous-frame selector. DOA2U keeps its verified 5849 surface

@@ -17,6 +17,16 @@ The Windows presenter builds SMAA by Jorge Jimenez and coauthors from
 iryoku/smaa, revision 71c806a838bdd7d517df19192a20f0c61b3ca29d, under its MIT
 license. Its original notices and LICENSE.txt remain in the fetched source.
 
+The macOS and Linux host layer (win32_compat, the POSIX fiber switch, the
+SDL3 audio output, the launchers and the SDL_GPU presenter's resource
+handling) adapts committed source from NoRain211/doa3-re (commit 48d05e9) and
+NoRain211/doaxbv-re, under GPL-3.0-or-later.
+
+recomp-runtime/audio_reverb.cpp is altered from FAudio's
+src/FAudioFX_reverb.c (FNA-XNA/FAudio 26.10), Copyright (c) 2011-2024 Ethan
+Lee, Luigi Auriemma, and the MonoGame Team, under the zlib license, whose
+full text the file keeps.
+
 Dead or Alive, Xbox, and related names and marks belong to their respective
 owners. This project is not affiliated with or endorsed by those owners.
 

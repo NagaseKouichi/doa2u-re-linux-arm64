@@ -4,12 +4,12 @@
 
 # DOA2U Native PC Port
 
-**A native Windows port of _Dead or Alive 2 Ultimate_ (Xbox), built by static recompilation, with the goal of rewriting it into readable source.**
+**A native Windows, macOS and Linux port of _Dead or Alive 2 Ultimate_ (Xbox), built by static recompilation, with the goal of rewriting it into readable source.**
 
 [![Latest release](https://img.shields.io/github/v/release/NoRain211/doa2u-re?label=alpha)](https://github.com/NoRain211/doa2u-re/releases/latest)
 [![CI](https://github.com/NoRain211/doa2u-re/actions/workflows/public-ci.yml/badge.svg)](https://github.com/NoRain211/doa2u-re/actions/workflows/public-ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)
+![Platform: Windows | macOS | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078D6)
 
 [Download](https://github.com/NoRain211/doa2u-re/releases/latest) ·
 [Features](#features) ·
@@ -32,7 +32,9 @@ The DOA2 game executable on Ultimate's second disc is lifted to C with a
 static recompiler, then linked against a hand-written runtime that replaces
 the Xbox kernel imports and the game's Direct3D 8, DirectSound and input
 libraries (XDK build 5849) with native Windows equivalents: Direct3D 11,
-XAudio2 and SDL3. The rest of the game still runs as generated code. The plan
+XAudio2 and SDL3. On macOS and Linux the same runtime renders through SDL_GPU
+(Metal or Vulkan) and plays through SDL3 audio. The rest of the game still runs
+as generated code. The plan
 is to replace game logic with readable, hand-written source while the game
 keeps running.
 
@@ -40,6 +42,10 @@ keeps running.
 
 - **The whole game, recompiled.** Boot, menus, character select, Story,
   Watch and the attract demo run on the original game code, lifted to C.
+- **macOS and Linux.** Native Metal and Vulkan builds through SDL_GPU, for
+  Apple Silicon and Intel Macs, Linux PCs and the Steam Deck, from the same
+  lifted program and HLSL shaders as Windows. A gamepad settings screen works
+  in Steam Game Mode. See [building on macOS and Linux](docs/building.md).
 - **Native renderer.** Direct3D 11 at 480p to 4K, the game's own 16:9
   widescreen camera and menus, MSAA up to 32x and SMAA Ultra. Water
   reflections render at the output resolution; bloom and lighting follow the
@@ -82,7 +88,7 @@ keeps running.
 | Xbox and other SDL3 controllers, keyboard | Working; keyboard drives player 1 |
 | Xbox Live menus | Stop the game; there is no online service |
 | Hand-written game logic | Not started; the game runs as generated code |
-| macOS and Linux | Planned ([ADR 0001](docs/adr/0001-three-platform-targets.md)) |
+| macOS and Linux | Boot, menus and the attract demo render at 60 fps through Metal and Vulkan; MSAA up to 8x, no SMAA ([building](docs/building.md)) |
 
 **Known issues:** a demanding moment on The Burai Zenin can still drop a
 single frame; the safari stage's heat haze does not ripple yet, and its water
@@ -91,6 +97,9 @@ around bright surfaces as on the Xbox, which reads more strongly on a sharp
 4K image.
 
 ## Play the alpha
+
+On macOS and Linux, including the Steam Deck, follow
+[building on macOS and Linux](docs/building.md) instead.
 
 **Requirements:** Windows 10/11 x64,
 [Python 3.12 or newer](https://www.python.org/downloads/windows/) on PATH,
@@ -186,7 +195,7 @@ the photo from `private/release-assets/`, with
 
 | Path | Contents |
 | --- | --- |
-| [`recomp-runtime/`](recomp-runtime) | Runtime, kernel and input adapters, audio, D3D8 replacements, D3D11 presenter, tests |
+| [`recomp-runtime/`](recomp-runtime) | Runtime, kernel and input adapters, audio, D3D8 replacements, D3D11 and SDL_GPU presenters, tests |
 | [`xbe/`](xbe) | XBE parsing and hashing |
 | [`tools/`](tools) | Disc import, build, launcher, packaging and export checks; pinned lifter submodule |
 | [`docs/`](docs) | Bring-up notes, reuse provenance, decisions and the release README |

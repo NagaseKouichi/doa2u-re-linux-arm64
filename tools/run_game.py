@@ -9,7 +9,7 @@ import subprocess
 import sys
 import uuid
 
-from build_game import ROOT, program_manifest, selected_xbe
+from build_game import ROOT, program_manifest, runner_path, selected_xbe
 import dedication_card
 from extract_iso import sha256
 
@@ -54,6 +54,32 @@ def seed_hdd_cache(disc):
         partial.replace(target)
 
 
+def saved_settings():
+    """The choices a launcher saved in private/launcher.json, as run() options."""
+    try:
+        saved = json.loads((ROOT / "private/launcher.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    options = {}
+    if saved.get("height") in (480, 720, 1080, 1440, 2160):
+        options["resolution"] = saved["height"]
+    if saved.get("msaa") in (1, 2, 4, 8, 16, 32):
+        options["msaa"] = saved["msaa"]
+    for key, option in (("smaa", "smaa"), ("widescreen", "widescreen"), ("skipIntro", "skip_intro")):
+        if isinstance(saved.get(key), bool):
+            options[option] = saved[key]
+    return options
+
+
+def open_launcher():
+    """Linux builds its settings screen beside the runner (tools/launcher_sdl.cpp);
+    macOS runs tools/launcher_macos.swift from launcher.sh instead."""
+    launcher = runner_path(ROOT).with_name("recomp_launcher")
+    if not launcher.is_file():
+        raise ValueError(f"{launcher} is missing; rebuild with ./build_game.sh")
+    return subprocess.run([str(launcher), str(ROOT)]).returncode == 0
+
+
 def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), analog_polls=(),
         widescreen=None, msaa=None, smaa=None, resolution=None, story_finale=False,
         skip_intro=False):
@@ -86,7 +112,7 @@ def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), a
     if receipt["recipe"]["xbe_sha256"] != sha256(selected) or program_manifest(generated) != (
             receipt["manifest_sha256"], receipt["ebp_count"]):
         raise ValueError("Game or generated sources differ from the build receipt")
-    runner = ROOT / "build/recomp-program/Release/recomp_program_runner.exe"
+    runner = runner_path(ROOT)
     if sha256(runner) != receipt["runner_sha256"]:
         raise ValueError("Runner differs from its successful build receipt")
     # A finale run clears Story, so it keeps its unlocks out of the player's saves.
@@ -171,12 +197,23 @@ if __name__ == "__main__":
                         help="Debug: Story skips to its last fights with each CPU at 1 life")
     parser.add_argument("--skip-intro", action="store_true",
                         help="Skip the logo and opening movies at boot")
+    parser.add_argument("--saved", action="store_true",
+                        help="Use the choices saved by the launcher in private/launcher.json")
+    parser.add_argument("--launcher", action="store_true",
+                        help="Open the Linux settings screen first, then play with its choices")
     args = parser.parse_args()
     try:
+        if args.launcher and not open_launcher():
+            raise SystemExit(0)
+        saved = saved_settings() if args.saved or args.launcher else {}
+        def pick(name, value):
+            return value if value is not None else saved.get(name)
         raise SystemExit(run(None if args.play else args.seconds, args.input_start_pulse_at,
                              args.input_a_pulse_at, args.isolated, args.input_buttons_pulse_at,
-                             args.input_analog_pulse_at, args.widescreen, args.msaa, args.smaa,
-                             args.resolution, args.story_finale, args.skip_intro))
+                             args.input_analog_pulse_at, pick("widescreen", args.widescreen),
+                             pick("msaa", args.msaa), pick("smaa", args.smaa),
+                             pick("resolution", args.resolution), args.story_finale,
+                             args.skip_intro or saved.get("skip_intro", False)))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print(f"Cannot run game: {error}", file=sys.stderr)
         raise SystemExit(1)

@@ -14,6 +14,10 @@
     "README.md",
     "play.cmd",
     "BuildGame.cmd",
+    "docs/building.md",
+    "run_game.sh",
+    "launcher.sh",
+    "build_game.sh",
     "public-export.json",
     "docs/reuse.md",
     "docs/adr/0001-three-platform-targets.md",
@@ -35,6 +39,8 @@
     "tools/test_dedication_card.py",
     "tools/launcher.ps1",
     "tools/test_run_game.py",
+    "tools/launcher_sdl.cpp",
+    "tools/launcher_macos.swift",
     "tools/doa2u/seed_functions.json"
   ],
   "quarantine": [

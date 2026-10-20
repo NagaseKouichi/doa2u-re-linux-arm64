@@ -8,7 +8,7 @@ import os
 import subprocess
 from unittest.mock import Mock, patch
 
-from run_game import prepare_disc, run, seed_hdd_cache
+from run_game import prepare_disc, run, runner_path, seed_hdd_cache
 
 
 class DiscTests(unittest.TestCase):
@@ -79,7 +79,7 @@ foreach ($enabled in @($true, $false)) {
                     self.assertEqual(float(env["RECOMP_D3D_SCALE"]), height / 480)
                 self.assertIsNone(execute.call_args.kwargs["timeout"])
                 self.assertEqual(execute.call_args.args[0], [
-                    str(root / "build/recomp-program/Release/recomp_program_runner.exe"),
+                    str(runner_path(root)),
                     "--xbe", str(disc / selected.name), "--disc-root", str(disc)])
                 self.assertEqual(run(None, skip_intro=True), 0)
                 self.assertEqual(execute.call_args.args[0][-1], "--skip-intro")
@@ -205,7 +205,7 @@ foreach ($enabled in @($true, $false)) {
             (root / "private/program").mkdir(parents=True)
             selected = root / "private/synthetic.input"
             selected.write_bytes(b"synthetic input")
-            runner = root / "build/recomp-program/Release/recomp_program_runner.exe"
+            runner = runner_path(root)
             runner.parent.mkdir(parents=True)
             runner.write_bytes(b"stale runner")
             receipt = dict(recipe=dict(xbe_sha256="input-hash"),
