@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -39,7 +40,15 @@ def install_llvm_mingw(root):
             contents.extractall(staging)
         (top,) = staging.iterdir()  # the release ZIP holds one versioned folder
         target.parent.mkdir(parents=True, exist_ok=True)
-        top.replace(target)
+        # Antivirus scans of the fresh executables can briefly lock the folder against renaming.
+        for attempt in range(30):
+            try:
+                top.replace(target)
+                break
+            except PermissionError:
+                if attempt == 29:
+                    raise
+                time.sleep(1)
 
 
 def llvm_mingw(root):
