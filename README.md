@@ -97,7 +97,7 @@ around bright surfaces as on the Xbox, which reads more strongly on a sharp
 [CMake 3.20 or newer](https://cmake.org/download/) on PATH,
 [Visual Studio 2022 or its Build Tools](https://visualstudio.microsoft.com/downloads/)
 with **Desktop development with C++**, internet access for the first build,
-and your Disc 2 ISO with about 5 GB free.
+and your Disc 2 ISO with about 6 GB free.
 
 1. Download the ZIP from the
    [latest release](https://github.com/NoRain211/doa2u-re/releases/latest) and

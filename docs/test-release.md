@@ -15,7 +15,7 @@ What you need (Windows 10 or 11, 64-bit):
   https://visualstudio.microsoft.com/downloads/
 - An internet connection for the first build (it downloads SDL3, SMAA
   and the Capstone and Pillow Python packages).
-- Your Disc 2 as an Xbox ISO, and about 5 GB of free space on the drive
+- Your Disc 2 as an Xbox ISO, and about 6 GB of free space on the drive
   holding this folder.
 
 Build (once, about 15 minutes):
