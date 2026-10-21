@@ -19,6 +19,8 @@
 Sister projects: [DOA3](https://github.com/NoRain211/doa3-re) ·
 [DOAXBV](https://github.com/NoRain211/doaxbv-re)
 
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/norainsrecomps)
+
 </div>
 
 > [!IMPORTANT]
