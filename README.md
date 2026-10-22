@@ -186,6 +186,8 @@ At first launch `run_game.py` builds an image from
 `private/dedication-photo.jpg` (shipped in the release ZIP) with Pillow.
 `python tools/run_game.py --play --story-finale` is a debug shortcut to the
 ending that uses separate probe saves.
+`--no-unlock-all` turns off the automatic character and costume unlock, so
+unlocks come from play; profiles already saved with the unlock keep it.
 
 To package a release ZIP from a clean checkout:
 

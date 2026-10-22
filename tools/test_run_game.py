@@ -83,6 +83,8 @@ foreach ($enabled in @($true, $false)) {
                     "--xbe", str(disc / selected.name), "--disc-root", str(disc)])
                 self.assertEqual(run(None, skip_intro=True), 0)
                 self.assertEqual(execute.call_args.args[0][-1], "--skip-intro")
+                self.assertEqual(run(None, unlock_all=False), 0)
+                self.assertEqual(execute.call_args.args[0][-1], "--no-unlock-all")
                 # A soft-reset relaunch starts one more runner in the same session log.
                 execute.reset_mock()
                 execute.side_effect = [Mock(returncode=4), Mock(returncode=0)]
@@ -90,7 +92,7 @@ foreach ($enabled in @($true, $false)) {
                 self.assertEqual(execute.call_count, 2)
             self.assertEqual(save.read_text(), "user save")
             logs = list((root / "private/play-logs").glob("*.log"))
-            self.assertEqual(len(logs), 7)
+            self.assertEqual(len(logs), 8)
             self.assertIn("runner_sha256=hash", logs[0].read_text())
 
     def test_isolated_probe_uses_separate_saves_and_scripted_input(self):

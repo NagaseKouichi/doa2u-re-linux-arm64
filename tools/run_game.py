@@ -90,7 +90,7 @@ def open_launcher():
 
 def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), analog_polls=(),
         widescreen=None, msaa=None, smaa=None, resolution=None, story_finale=False,
-        skip_intro=False):
+        skip_intro=False, unlock_all=True):
     if seconds is not None and seconds <= 0:
         raise ValueError("Probe duration must be positive")
     if msaa is not None and msaa not in (1, 2, 4, 8, 16, 32):
@@ -163,6 +163,8 @@ def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), a
                 command.append("--story-finale")
             if skip_intro:
                 command.append("--skip-intro")
+            if not unlock_all:
+                command.append("--no-unlock-all")
             for poll in start_polls:
                 command.extend(["--input-start-pulse-at", str(poll)])
             for poll in a_polls:
@@ -213,6 +215,8 @@ if __name__ == "__main__":
                         help="Debug: Story skips to its last fights with each CPU at 1 life")
     parser.add_argument("--skip-intro", action="store_true",
                         help="Skip the logo and opening movies at boot")
+    parser.add_argument("--no-unlock-all", dest="unlock_all", action="store_false",
+                        help="Leave character and costume unlocks to play, for acceptance runs")
     parser.add_argument("--saved", action="store_true",
                         help="Use the choices saved by the launcher in private/launcher.json")
     parser.add_argument("--launcher", action="store_true",
@@ -229,7 +233,7 @@ if __name__ == "__main__":
                              args.input_analog_pulse_at, pick("widescreen", args.widescreen),
                              pick("msaa", args.msaa), pick("smaa", args.smaa),
                              pick("resolution", args.resolution), args.story_finale,
-                             args.skip_intro or saved.get("skip_intro", False)))
+                             args.skip_intro or saved.get("skip_intro", False), args.unlock_all))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print(f"Cannot run game: {error}", file=sys.stderr)
         raise SystemExit(1)
