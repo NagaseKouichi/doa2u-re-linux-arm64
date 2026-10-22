@@ -755,21 +755,12 @@ cooperative scheduler polling. D3D BlockUntilVerticalBlank and its two CRI
 tail aliases use the native shared-vblank service. These platform seams let
 the existing worker modules run; they do not force middleware load status.
 
-## Remaining bring-up
+## Remaining work
 
-1. Confirm the selected executable is the DOA2 portion using its launcher
-   transition and code, and authenticate the disc revision. Preserve that
-   evidence and the executable identity under `private/`.
-2. Resolve the first observed unsupported startup instruction or service at
-   its library boundary. Keep the whole-program lift as the temporary
-   scaffold; fix translator defects in the lifter and regenerate.
-3. Verify additional indirect targets and function bounds against the selected
-   Ghidra program and private identity receipt when a run reaches them.
-4. Complete native recording/crosstalk routing and CRI services, then XAPI
-   input coverage. Verify native audio, movies, polling and worker scheduling
-   against natural runs.
-5. Bind additional D3D8 resources, shaders and draws through the semantic
-   presenter. Verify title/menu entry and the first natural fight.
+The [roadmap](https://github.com/NoRain211/doa2u-re/issues/3) tracks the
+order of work to feature complete, and the
+[acceptance matrix](https://github.com/NoRain211/doa2u-re/issues/9) lists the
+flows each platform must pass.
 
 Online libraries and dashboard/update binaries are present on the disc.
 The initial scope is offline DOA2; any online behavior needs its own design.
