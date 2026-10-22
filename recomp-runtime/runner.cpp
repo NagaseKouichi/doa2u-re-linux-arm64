@@ -57,6 +57,7 @@ static bool sampleInput(std::uint32_t port, RecompInputGamepad *gamepad)
    +0x2ed8 to that character's costume count from 0x6e0f08 (the select screen
    shows min(byte, count)), and the three character flags at +0x2ed2 to 1.
    Repeating them each frame also covers profiles loaded later. */
+static bool unlockAll = true; // --no-unlock-all leaves unlocks to play
 static void unlockProfile(std::uint32_t)
 {
     const std::uint32_t profile = *recomp_memory_u32(0x0087cfa8u);
@@ -190,7 +191,7 @@ static void showCard()
 
 static void onSwap(std::uint32_t frame)
 {
-    unlockProfile(frame);
+    if (unlockAll) unlockProfile(frame);
     if (storyFinale) applyStoryFinale();
     if (!cardPending) return;
     cardPending = false;
@@ -212,6 +213,10 @@ int main(int argc, char **argv)
         }
         if (argument == "--story-finale") {
             storyFinale = true;
+            continue;
+        }
+        if (argument == "--no-unlock-all") {
+            unlockAll = false;
             continue;
         }
         if (argument == "--skip-intro") {
@@ -300,7 +305,7 @@ int main(int argc, char **argv)
                 " [--input-buttons-pulse-at <poll> <decimal-mask>]"
                 " [--input-analog-pulse-at <poll> <button-index>]"
                 " [--input-analog-pulse-every <first-poll> <period> <last-poll> <button-index>]"
-                " [--input-script-only] [--story-finale] [--skip-intro]\n";
+                " [--input-script-only] [--story-finale] [--skip-intro] [--no-unlock-all]\n";
             return 64;
         }
         const std::string value = argv[++i];
