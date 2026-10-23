@@ -35,11 +35,10 @@ def prepare_disc(source, disc):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     os.link(path, destination)
-                except OSError as error:
-                    raise ValueError(f"Cannot hardlink the disc into {disc} ({error.strerror}); "
-                                     "move this folder to an NTFS drive") from error
+                except OSError:
+                    shutil.copyfile(path, destination)  # FAT32 and exFAT have no hardlinks.
     except BaseException:
-        shutil.rmtree(staging)  # Holds only links to the import, so no saves are lost.
+        shutil.rmtree(staging)  # Holds only links or copies of the import, so no saves are lost.
         raise
     staging.rename(disc)
 

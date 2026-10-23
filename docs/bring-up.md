@@ -56,8 +56,9 @@ authentication, chunk gaps and uninitialized generated EBP prologues. Missing
 function bodies, unsupported imports and untranslated instructions stop
 explicitly.
 
-Use `tools/run_game.py` for a bounded probe. It hardlinks the disc files,
-preserves saves and logs the runner identity. Private notes hold the observed
+Use `tools/run_game.py` for a bounded probe. It hardlinks the disc files
+(copying them on drives without hardlinks), preserves saves and logs the
+runner identity. Private notes hold the observed
 frontier; a timeout by itself does not establish gameplay progress.
 
 For normal play, open `play.cmd` or run `python tools/run_game.py --play`.
