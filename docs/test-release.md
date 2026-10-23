@@ -18,9 +18,9 @@ What you need (Windows 10 or 11, 64-bit):
 
 Build (once, about 15 minutes):
 
-1. Extract this ZIP to a folder with a short path on an NTFS drive, for
-   example C:\DOA2U. FAT32 and exFAT drives, common on USB sticks, cannot
-   hold the play folder's hardlinks.
+1. Extract this ZIP to a folder with a short path, for example C:\DOA2U.
+   On FAT32 or exFAT drives, common on USB sticks, the play folder holds a
+   copy of the disc instead of hardlinks, so allow about 4 GB more space.
 2. Drag your Disc 2 ISO onto BuildGame.cmd. The ISO is only read.
 3. Wait for "Build complete". The build is checked against the exact
    program the developers tested; any difference stops the build.
