@@ -79,7 +79,7 @@ keeps running.
 | --- | --- |
 | Boot, menus, attract demo, character select | Working |
 | Stages | Every stage played |
-| Story, Kasumi | Played through the final fight, ending, credits and CG Gallery unlock (with the `--story-finale` shortcut) |
+| Story endings | Every ending, its credits and epilogue play |
 | Story, Ayane and Gen Fu | Stages 1-6 cleared without a stop in scripted runs; the Tengu fight was lost each time |
 | Watch | Fights played, including Kasumi vs Lei Fang on The Burai Zenin at 4K and 60 fps |
 | Other characters, Versus, Tag, Survival, Time Attack, Sparring | Not yet played through |
@@ -184,8 +184,6 @@ window. The build fetches pinned, hash-verified copies of SDL3 and
 
 At first launch `run_game.py` builds an image from
 `private/dedication-photo.jpg` (shipped in the release ZIP) with Pillow.
-`python tools/run_game.py --play --story-finale` is a debug shortcut to the
-ending that uses separate probe saves.
 `--no-unlock-all` turns off the automatic character and costume unlock, so
 unlocks come from play; profiles already saved with the unlock keep it.
 
