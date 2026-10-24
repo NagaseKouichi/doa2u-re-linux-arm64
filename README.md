@@ -70,7 +70,7 @@ keeps running.
 ## Status
 
 > [!WARNING]
-> **0.1.3 Alpha is bring-up software.** Story, Watch and the attract demo play
+> **0.1.4 Alpha is bring-up software.** Story, Watch and the attract demo play
 > in development runs on every stage, but many modes and characters have not
 > been tried. A draw the port cannot render yet stops the game with a message
 > in the log.
@@ -190,9 +190,9 @@ unlocks come from play; profiles already saved with the unlock keep it.
 To package a release ZIP from a clean checkout:
 
 ```powershell
-python tools/package_test.py 0.1.3-Alpha
-python tools/package_test.py 0.1.3-Alpha --platform macos
-python tools/package_test.py 0.1.3-Alpha --platform linux
+python tools/package_test.py 0.1.4-Alpha
+python tools/package_test.py 0.1.4-Alpha --platform macos
+python tools/package_test.py 0.1.4-Alpha --platform linux
 ```
 
 It zips committed HEAD, the pinned lifter and the photo from
