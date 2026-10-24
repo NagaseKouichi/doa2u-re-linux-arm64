@@ -196,15 +196,17 @@ foreach ($enabled in @($true, $false)) {
             prepare_disc(source, disc)
             self.assertEqual((disc / "local-save.txt").read_text(), "play save")
 
-    def test_partial_staging_is_not_treated_as_a_disc(self):
+    def test_interrupted_staging_is_rebuilt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source, disc = root / "source", root / "play"
             source.mkdir()
+            (source / "payload.txt").write_text("synthetic content")
             (root / "play.tmp").mkdir()
-            with self.assertRaises(FileExistsError):
-                prepare_disc(source, disc)
-            self.assertFalse(disc.exists())
+            (root / "play.tmp/partial.txt").write_text("half copied")
+            prepare_disc(source, disc)
+            self.assertFalse((root / "play.tmp").exists())
+            self.assertEqual(sorted(path.name for path in disc.iterdir()), ["payload.txt"])
 
     def test_copies_the_disc_when_the_drive_has_no_hardlinks(self):
         with tempfile.TemporaryDirectory() as folder:
