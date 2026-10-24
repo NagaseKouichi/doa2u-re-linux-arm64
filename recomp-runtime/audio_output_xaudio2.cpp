@@ -484,8 +484,12 @@ extern "C" void recomp_audio_output_submit(
     }
     const float queued_ms = static_cast<float>(
         voice.bytes_submitted / block_align - state.SamplesPlayed) * 1000.0f / sample_rate;
-    if (queued_ms > kMaxQueueMs) {
+    if (voice.queued == kQueueSize) {
         dropBuffer(slot, "queue-full", queued_ms);
+        return;
+    }
+    if (queued_ms > kMaxQueueMs) {
+        dropBuffer(slot, "too-far-ahead", queued_ms);
         return;
     }
     voice.level_ms += (queued_ms - voice.level_ms) / 16.0f; /* smooths pump jitter */
