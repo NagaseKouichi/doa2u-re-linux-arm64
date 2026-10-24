@@ -22,7 +22,10 @@ def prepare_disc(source, disc):
     if disc.exists():
         return
     staging = disc.with_name(disc.name + ".tmp")
+    if staging.exists():
+        shutil.rmtree(staging)  # Left by an interrupted first launch; holds no saves.
     staging.mkdir(parents=True)
+    copying = False
     try:
         for path in source.rglob("*"):
             relative = path.relative_to(source)
@@ -36,6 +39,11 @@ def prepare_disc(source, disc):
                 try:
                     os.link(path, destination)
                 except OSError:
+                    if not copying:
+                        print("This drive has no hardlinks, so the first launch copies the disc "
+                              "(about 4 GB). This can take several minutes; keep this window open.",
+                              flush=True)
+                        copying = True
                     shutil.copyfile(path, destination)  # FAT32 and exFAT have no hardlinks.
     except BaseException:
         shutil.rmtree(staging)  # Holds only links or copies of the import, so no saves are lost.
