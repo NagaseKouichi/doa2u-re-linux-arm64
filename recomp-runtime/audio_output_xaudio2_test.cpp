@@ -18,15 +18,16 @@
 
 /* Substitute only the API calls used by the backend; this test cannot open an
    audio device. Keep checks active in release builds too. */
-static void check(bool condition)
+static void check_at(bool condition, int line)
 {
     if (!condition) {
-        std::fprintf(stderr, "FAIL audio output backend\n");
+        std::fprintf(stderr, "FAIL audio output backend line %d\n", line);
         std::abort();
     }
 }
 
 struct FakeSendDescriptor { UINT32 Flags; void *pOutputVoice; };
+#define check(condition) check_at((condition), __LINE__)
 struct FakeVoiceSends { UINT32 SendCount; FakeSendDescriptor *pSends; };
 static bool reverb_unavailable, submix_unavailable, parameters_unavailable;
 static bool sends_unavailable, matrix_unavailable;
@@ -379,18 +380,18 @@ int main()
     recomp_audio_output_submit(0, pcm, sizeof pcm, 8000, 1, 16, -10000);
     check(submitted_buffers == 5 && dropped_buffers == 0 &&
         source->queued.size() == 6 && source->volume == 0.0f);
-    while (voices[0].queued < 16)
+    while (voices[0].queued < kQueueSize)
         recomp_audio_output_submit(0, pcm, sizeof pcm, 8000, 1, 16, 0);
     recomp_audio_output_submit(0, pcm, sizeof pcm, 8000, 1, 16, 0);
-    check(dropped_buffers == 1 && source->queued.size() == 16);
+    check(dropped_buffers == 1 && source->queued.size() == kQueueSize);
 
     /* Growing a slot must only reallocate retired buffers. */
     const uint8_t *active = source->queued[2].pAudioData;
     source->queued.erase(source->queued.begin(), source->queued.begin() + 2);
     uint8_t larger[1000] = {};
     recomp_audio_output_submit(0, larger, sizeof larger, 8000, 1, 16, 0);
-    check(source->queued.size() == 15 && source->queued[0].pAudioData == active &&
-        voices[0].front == 2 && voices[0].queued == 15 && underruns == 0);
+    check(source->queued.size() == kQueueSize - 1 && source->queued[0].pAudioData == active &&
+        voices[0].front == 2 && voices[0].queued == kQueueSize - 1 && underruns == 0);
 
     /* A drained voice counts an underrun and rebuilds its cushion. */
     source->queued.clear();
@@ -411,6 +412,13 @@ int main()
         recomp_audio_output_submit(2, larger, sizeof larger, 8000, 1, 16, 0);
     check(source->ratio > 1.0f && source->ratio <= 1.0f + kRateTrim);
 
+    /* A voice further ahead than kMaxQueueMs drops instead of growing latency. */
+    const auto ahead_dropped = dropped_buffers;
+    uint8_t long_pcm[4000] = {};
+    recomp_audio_output_submit(3, long_pcm, sizeof long_pcm, 8000, 1, 16, 0);
+    recomp_audio_output_submit(3, long_pcm, sizeof long_pcm, 8000, 1, 16, 0);
+    check(dropped_buffers == ahead_dropped + 1 && voices[3].source->queued.size() == 2);
+
     std::memset(pcm, 0x80, sizeof pcm);
     recomp_audio_output_submit(1, pcm, sizeof pcm, 8000, 1, 8, 0);
     check(nonzero_buffers == 1);
@@ -426,6 +434,7 @@ int main()
         voices[1].channels == 2 && voices[1].bits_per_sample == 16);
 
     auto submitted = submitted_buffers;
+    const auto invalid_before = dropped_buffers;
     recomp_audio_output_submit(256, pcm, sizeof pcm, 8000, 1, 16, 0);
     recomp_audio_output_submit(0, nullptr, sizeof pcm, 8000, 1, 16, 0);
     recomp_audio_output_submit(0, pcm, 160001, 8000, 1, 16, 0);
@@ -434,7 +443,7 @@ int main()
     recomp_audio_output_submit(0, pcm, sizeof pcm, 8000, 3, 16, 0);
     recomp_audio_output_submit(0, pcm, sizeof pcm, 8000, 1, 24, 0);
     recomp_audio_output_submit(0, pcm, 7, 8000, 2, 16, 0);
-    check(submitted_buffers == submitted && dropped_buffers == 9);
+    check(submitted_buffers == submitted && dropped_buffers == invalid_before + 8);
 
     /* Float keeps headroom, signed-zero silence, and byte/frame accounting. */
     float float_pcm[] = {0.0f, -0.0f, 1.5f, -1.5f};

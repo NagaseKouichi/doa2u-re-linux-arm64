@@ -16,7 +16,10 @@
 namespace {
 
 constexpr uint32_t kVoiceCount = 256;
-constexpr uint32_t kQueueSize = 16;
+/* The ring bounds memory; the time budget bounds latency, so voices that
+   submit millisecond pieces are not dropped after a few milliseconds. */
+constexpr uint32_t kQueueSize = 128;
+constexpr float kMaxQueueMs = 250.0f;
 constexpr uint32_t kMaxBufferBytes = 160000;
 /* Silence queued ahead of a new or starved voice, so producer jitter (15.6 ms
    clock steps, thread wakeups) is absorbed instead of heard as gaps. */
@@ -65,6 +68,7 @@ IXAudio2SubmixVoice *reverb_voice;
 OutputVoice voices[kVoiceCount];
 VoiceRouting routing[kVoiceCount];
 bool reported_nonzero[kVoiceCount];
+bool routing_reported[kVoiceCount];
 bool attempted, com_initialized, callback_registered, summary_printed, muted;
 /* Initialized COM; only this thread may release it. */
 std::atomic<DWORD> owner_thread{0};
@@ -87,6 +91,7 @@ void releaseOutput()
     if (reverb_voice) reverb_voice->DestroyVoice();
     reverb_voice = nullptr;
     std::memset(routing, 0, sizeof routing);
+    std::memset(routing_reported, 0, sizeof routing_reported);
     if (master) master->DestroyVoice();
     recomp_audio_capture_save();
     master = nullptr;
@@ -124,14 +129,19 @@ void checkCriticalError()
     if (engine && FAILED(error)) disableOutput("device", error);
 }
 
-void dropBuffer(uint32_t slot, const char *reason)
+void dropBuffer(uint32_t slot, const char *reason, float queued_ms = -1.0f)
 {
     ++dropped_buffers;
     if (dropped_buffers <= 4 ||
         (dropped_buffers & (dropped_buffers - 1)) == 0) {
-        std::fprintf(stderr,
-            "[audio-output] dropped=%llu slot=%u reason=%s\n",
-            dropped_buffers, slot, reason);
+        if (queued_ms >= 0.0f)
+            std::fprintf(stderr,
+                "[audio-output] dropped=%llu slot=%u reason=%s queued_ms=%.0f\n",
+                dropped_buffers, slot, reason, static_cast<double>(queued_ms));
+        else
+            std::fprintf(stderr,
+                "[audio-output] dropped=%llu slot=%u reason=%s\n",
+                dropped_buffers, slot, reason);
     }
 }
 
@@ -298,6 +308,7 @@ extern "C" void recomp_audio_output_reset_voice(uint32_t slot)
     if (slot < kVoiceCount) {
         destroyVoice(voices[slot]);
         routing[slot] = {};
+        routing_reported[slot] = false;
     }
 }
 
@@ -375,6 +386,16 @@ extern "C" int recomp_audio_output_set_voice_routing(uint32_t slot, uint32_t cha
     if (voice.source && !applyRouting(voice, route)) return 0;
     routing[slot] = route;
     ++routing_updates;
+    if (wet_send && !routing_reported[slot]) {
+        routing_reported[slot] = true;
+        std::fprintf(stderr,
+            "[audio-output] routing slot=%u channels=%u "
+            "dry=%.3f,%.3f,%.3f,%.3f wet=%.3f,%.3f,%.3f,%.3f\n", slot, channels,
+            static_cast<double>(route.dry[0]), static_cast<double>(route.dry[1]),
+            static_cast<double>(route.dry[2]), static_cast<double>(route.dry[3]),
+            static_cast<double>(route.wet[0]), static_cast<double>(route.wet[1]),
+            static_cast<double>(route.wet[2]), static_cast<double>(route.wet[3]));
+    }
     return 1;
 }
 
@@ -463,6 +484,14 @@ extern "C" void recomp_audio_output_submit(
     }
     const float queued_ms = static_cast<float>(
         voice.bytes_submitted / block_align - state.SamplesPlayed) * 1000.0f / sample_rate;
+    if (voice.queued == kQueueSize) {
+        dropBuffer(slot, "queue-full", queued_ms);
+        return;
+    }
+    if (queued_ms > kMaxQueueMs) {
+        dropBuffer(slot, "too-far-ahead", queued_ms);
+        return;
+    }
     voice.level_ms += (queued_ms - voice.level_ms) / 16.0f; /* smooths pump jitter */
     float ratio = 1.0f + (voice.level_ms - kPrerollMs) / 10000.0f;
     if (ratio < 1.0f - kRateTrim) ratio = 1.0f - kRateTrim;
