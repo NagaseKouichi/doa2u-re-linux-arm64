@@ -11,6 +11,25 @@ from collections import OrderedDict
 
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT = os.path.join("tools", "doa2u", "function_status.json")
+GRID_START = "<!-- function-status-grid:start -->"
+GRID_END = "<!-- function-status-grid:end -->"
+AREA_LABELS = {
+    "GAME": "Game",
+    "CRI_MIDDLEWARE": "CRI middleware",
+    "SDK_XAPI_CRT": "SDK / CRT",
+    "UNTAGGED": "Untagged",
+}
+AREA_ORDER = ("GAME", "CRI_MIDDLEWARE", "SDK_XAPI_CRT")
+ICONS = {
+    "named": u"\u2b1c",
+    "decompiled": u"\U0001f7e8",
+    "bound": u"\U0001f7e6",
+    "tested": u"\U0001f7e9",
+}
+STATUS_ORDER = ("named", "decompiled", "bound", "tested")
+SEPARATOR = u" \u00b7 "
+DASH = u" \u2014 "
+GRID_WIDTH = 40
 
 
 def ghidra_global(name):
@@ -104,6 +123,97 @@ def write(path, entries):
     return ordered
 
 
+def thousands(value):
+    return u"{:,}".format(value)
+
+
+def percentage(value, total):
+    if not total:
+        return 0
+    return (value * 100 + total // 2) // total
+
+
+def summary(row):
+    total = sum(row.values())
+    if not total:
+        return u"0 tracked"
+    parts = [
+        u"%s tracked" % thousands(total),
+        u"%s named" % thousands(row.get("named", 0)),
+    ]
+    for status in ("decompiled", "bound", "tested"):
+        if row.get(status):
+            parts.append(u"%s %s" % (thousands(row[status]), status))
+    ported = row.get("decompiled", 0) + row.get("bound", 0) + row.get("tested", 0)
+    parts.append(u"%d%% decompiled or ported" % percentage(ported, total))
+    return SEPARATOR.join(parts)
+
+
+def status_grid(entries):
+    counts = {}
+    for entry in entries:
+        tag = entry.get("tag", "UNTAGGED")
+        status = entry.get("status", "named")
+        if status not in ICONS:
+            status = "named"
+        row = counts.setdefault(tag, {})
+        row[status] = row.get(status, 0) + 1
+
+    tags = list(AREA_ORDER)
+    for tag in sorted(counts):
+        if tag not in tags and tag != "UNTAGGED":
+            tags.append(tag)
+    tags.append("UNTAGGED")
+
+    lines = [
+        u"Each square is one tracked function. " + SEPARATOR.join(
+            u"%s %s" % (ICONS[status], status) for status in STATUS_ORDER
+        ) + u".",
+        u"",
+    ]
+    total = {status: 0 for status in STATUS_ORDER}
+    for tag in tags:
+        row = counts.get(tag, {})
+        for status in STATUS_ORDER:
+            total[status] += row.get(status, 0)
+        label = AREA_LABELS.get(tag, tag.replace("_", " ").title())
+        lines.append(u"**%s**%s%s" % (label, DASH, summary(row)))
+        squares = u"".join(
+            ICONS[status] * row.get(status, 0) for status in STATUS_ORDER
+        )
+        for index in range(0, len(squares), GRID_WIDTH):
+            lines.append(squares[index:index + GRID_WIDTH] + u"<br>")
+        lines.append(u"")
+    lines.append(u"**Total**%s%s" % (DASH, summary(total)))
+    return u"\n".join(lines).rstrip()
+
+
+def write_readme(repo, entries):
+    path = os.path.join(repo, "README.md")
+    if not os.path.isfile(path):
+        print("README grid skipped: README.md not found")
+        return
+    stream = open(path, "rb")
+    try:
+        text = stream.read().decode("utf-8")
+    finally:
+        stream.close()
+    if GRID_START not in text or GRID_END not in text:
+        print("README grid skipped: markers not found")
+        return
+    start = text.index(GRID_START) + len(GRID_START)
+    end = text.index(GRID_END, start)
+    updated = text[:start] + "\n" + status_grid(entries) + "\n" + text[end:]
+    if updated == text:
+        return
+    stream = open(path, "wb")
+    try:
+        stream.write(updated.encode("utf-8"))
+    finally:
+        stream.close()
+    print("updated README grid")
+
+
 def run():
     executable = executable_path()
     if os.path.basename(executable).lower() != "doa2.xbe":
@@ -158,6 +268,7 @@ def run():
             entries.pop(address)
 
     ordered = write(path, entries)
+    write_readme(repo, ordered)
     counts = {}
     for entry in ordered:
         status = entry.get("status", "named")
