@@ -1,5 +1,9 @@
 # Building on macOS and Linux
 
+Experimental Linux AArch64 cross-build instructions are in
+[linux-arm64.md](linux-arm64.md) ([中文](linux-arm64-CN.md)). This is a
+runtime/toolchain bring-up, not yet a claim of ARM64 game compatibility.
+
 The runner also builds natively for macOS (Apple Silicon or Intel) and Linux
 x86-64, including SteamOS. It is the same lifted program and runtime as the
 Windows build; only the host layer differs:

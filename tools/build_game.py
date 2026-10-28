@@ -118,11 +118,14 @@ def use_windows_newlines(generated):
             path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
 
 
-def runner_path(root=ROOT):
-    """The Windows runner builds with llvm-mingw in its own folder, so an old MSVC cache cannot clash."""
-    if sys.platform == "win32":
-        return root / "build/recomp-program-mingw/recomp_program_runner.exe"
-    return root / "build/recomp-program/recomp_program_runner"
+def runner_path(root=ROOT, build_dir=None):
+    """Keep native and cross-build caches separate; resolve relative paths at root."""
+    windows = sys.platform == "win32"
+    directory = Path(build_dir) if build_dir is not None else Path(
+        "build/recomp-program-mingw" if windows else "build/recomp-program")
+    if not directory.is_absolute():
+        directory = root / directory
+    return directory / ("recomp_program_runner.exe" if windows else "recomp_program_runner")
 
 
 def program_manifest(generated):
@@ -193,8 +196,17 @@ def import_disc(iso, extractor=None):
     raise ValueError("This build supports only Dead or Alive Ultimate (Xbox, USA) Disc 2")
 
 
-def build(build_only=False, lift_only=False, iso=None, disassemble=False, extractor=None):
+def build(build_only=False, lift_only=False, iso=None, disassemble=False, extractor=None,
+          cmake_toolchain=None, build_dir=None):
     windows = sys.platform == "win32"
+    if cmake_toolchain is not None:
+        if windows:
+            raise ValueError("Windows cross toolchain override is not supported")
+        cmake_toolchain = Path(cmake_toolchain).resolve()
+        if not cmake_toolchain.is_file():
+            raise ValueError("CMake toolchain file is missing")
+        if build_dir is None:
+            build_dir = ROOT / "build/recomp-program-cross"
     if iso is not None:
         import_disc(iso, extractor)
         if shutil.which("cmake") is None:
@@ -267,13 +279,16 @@ def build(build_only=False, lift_only=False, iso=None, disassemble=False, extrac
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     if lift_only:
         return
-    build_dir = runner_path().parent
+    runner = runner_path(ROOT, build_dir=build_dir)
+    build_dir = runner.parent
     if windows:
         generator = ["-G", "MinGW Makefiles", "-DCMAKE_BUILD_TYPE=Release",
                      f"-DCMAKE_C_COMPILER={compiler.as_posix()}",
                      f"-DCMAKE_CXX_COMPILER={compiler.with_name('clang++.exe').as_posix()}"]
     else:
         generator = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
+    if cmake_toolchain is not None:
+        generator.append(f"-DCMAKE_TOOLCHAIN_FILE={cmake_toolchain.as_posix()}")
     if sys.platform.startswith("linux"):
         generator.append("-DRECOMP_FETCH_SDL3=ON")  # used only when the system has no SDL3
     progress.run(["cmake", "-S", ROOT / "recomp-runtime", "-B", build_dir, *generator,
@@ -287,7 +302,7 @@ def build(build_only=False, lift_only=False, iso=None, disassemble=False, extrac
     jobs = str(os.cpu_count() or 4) if windows else str(min(4, os.cpu_count() or 1))
     progress.run(["cmake", "--build", build_dir, "--parallel", jobs,
                 "--target", *targets], logs / "build.log")
-    receipt["runner_sha256"] = sha256(runner_path())
+    receipt["runner_sha256"] = sha256(runner)
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
@@ -301,9 +316,12 @@ def main():
     modes.add_argument("--disassemble", action="store_true",
                        help="Rewrite tools/doa2u/functions from a fresh disassembly, then build")
     parser.add_argument("--extractor", help="extract-xiso to use instead of the one on PATH")
+    parser.add_argument("--cmake-toolchain", type=Path, help="CMake cross toolchain file")
+    parser.add_argument("--build-dir", type=Path, help="Separate build tree (relative to repository)")
     args = parser.parse_args()
     try:
-        build(args.build_only, args.lift_only, args.iso, args.disassemble, args.extractor)
+        build(args.build_only, args.lift_only, args.iso, args.disassemble, args.extractor,
+              cmake_toolchain=args.cmake_toolchain, build_dir=args.build_dir)
     except (OSError, ValueError, KeyError, ImportError, subprocess.CalledProcessError) as error:
         print(f"Build failed: {error}", file=sys.stderr)
         return 1

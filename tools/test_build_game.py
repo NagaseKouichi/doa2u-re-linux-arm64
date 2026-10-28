@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Synthetic source authentication and target-custody checks."""
+from contextlib import ExitStack
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +12,134 @@ from unittest.mock import patch
 from build_game import (STEPS, build_fraction, import_disc, lifter_revision, merge_functions,
                         program_manifest, selected_xbe, use_windows_newlines, write_functions)
 from extract_iso import sha256
+
+
+class CrossBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.work = self.root / "private/program"
+        generated = self.work / "generated"
+        generated.mkdir(parents=True)
+        for name in ("recomp_0000.c", "recomp_dispatch.c", "recomp_funcs.h"):
+            (generated / name).write_text("/* synthetic */\n")
+        xbe = self.root / "private/synthetic.input"
+        xbe.write_bytes(b"synthetic input")
+        (self.root / "private/target.json").write_text(json.dumps(dict(
+            xbe_path="private/synthetic.input", xbe_sha256=sha256(xbe))))
+        shards = self.root / "shards"
+        shards.mkdir()
+        (shards / "00.json").write_text("[]")
+        functions = self.work / "functions.json"
+        functions.write_text("[]")
+        manifest, ebp = program_manifest(generated)
+        self.receipt = dict(recipe=dict(xbe_sha256=sha256(xbe), lifter_commit="a" * 40,
+                                       capstone="synthetic", functions_sha256=sha256(functions)),
+                            manifest_sha256=manifest, ebp_count=ebp)
+        self.receipt_path = self.work / "receipt.json"
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.toolchain = self.root / "cross toolchain.cmake"
+        self.toolchain.write_text("# synthetic toolchain\n")
+        self.calls = []
+        self.stack.enter_context(patch("build_game.ROOT", self.root))
+        self.stack.enter_context(patch("build_game.FUNCTIONS", shards))
+        self.stack.enter_context(patch("build_game.sys.platform", "linux"))
+        self.stack.enter_context(patch.dict(sys.modules, capstone=SimpleNamespace(__version__="synthetic")))
+        self.stack.enter_context(patch("build_game.lifter_revision", return_value="a" * 40))
+        self.stack.enter_context(patch("build_game.Progress.run", side_effect=self.record_command))
+
+    def record_command(self, args, log_path, cwd=None):
+        self.calls.append(args)
+        if args[:2] == ["cmake", "--build"]:
+            build_dir = Path(args[2])
+            build_dir.mkdir(parents=True, exist_ok=True)
+            (build_dir / "recomp_program_runner").write_bytes(b"synthetic runner")
+
+    def assert_build(self, build_dir, toolchain=None):
+        configure, compile_command = self.calls
+        self.assertEqual(configure[configure.index("-B") + 1], build_dir)
+        self.assertEqual(compile_command[2], build_dir)
+        self.assertIn("Ninja", configure)
+        self.assertIn("-DRECOMP_FETCH_SDL3=ON", configure)
+        for option, value in (("RECOMP_XBE_SHA256", self.receipt["recipe"]["xbe_sha256"]),
+                              ("RECOMP_PROGRAM_MANIFEST_SHA256", self.receipt["manifest_sha256"]),
+                              ("RECOMP_PROGRAM_EBP_EXPECTED", self.receipt["ebp_count"])):
+            self.assertIn(f"-D{option}={value}", configure)
+        if toolchain is not None:
+            self.assertIn(f"-DCMAKE_TOOLCHAIN_FILE={toolchain.resolve().as_posix()}", configure)
+        else:
+            self.assertFalse(any(str(arg).startswith("-DCMAKE_TOOLCHAIN_FILE=") for arg in configure))
+        receipt = json.loads(self.receipt_path.read_text())
+        self.assertEqual(receipt["recipe"], self.receipt["recipe"])
+        self.assertEqual(receipt["runner_sha256"], sha256(build_dir / "recomp_program_runner"))
+
+    def test_native_build_keeps_default_directory(self):
+        import build_game
+        build_game.build(build_only=True)
+        self.assert_build(self.root / "build/recomp-program")
+
+    def test_toolchain_uses_separate_default_directory(self):
+        import build_game
+        build_game.build(build_only=True, cmake_toolchain=self.toolchain)
+        self.assert_build(self.root / "build/recomp-program-cross", self.toolchain)
+
+    def test_explicit_directory_is_used_with_or_without_toolchain(self):
+        import build_game
+        for toolchain in (None, self.toolchain):
+            with self.subTest(toolchain=toolchain):
+                self.calls.clear()
+                directory = self.root / "custom build"
+                build_game.build(build_only=True, cmake_toolchain=toolchain, build_dir=directory)
+                self.assert_build(directory, toolchain)
+
+    def test_relative_toolchain_is_resolved_from_working_directory(self):
+        import build_game
+        import os
+        cwd = Path.cwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.root)
+        build_game.build(build_only=True, cmake_toolchain=Path(self.toolchain.name))
+        self.assert_build(self.root / "build/recomp-program-cross", self.toolchain)
+
+    def test_cross_build_still_rejects_tampered_generated_sources(self):
+        import build_game
+        (self.work / "generated/recomp_funcs.h").write_text("changed")
+        with self.assertRaisesRegex(ValueError, "authenticated receipt"):
+            build_game.build(build_only=True, cmake_toolchain=self.toolchain)
+        self.assertEqual(self.calls, [])
+
+    def test_missing_toolchain_is_rejected_before_build(self):
+        import build_game
+        with self.assertRaisesRegex(ValueError, "toolchain"):
+            build_game.build(build_only=True, cmake_toolchain=self.root / "missing.cmake")
+        self.assertEqual(self.calls, [])
+
+    def test_windows_rejects_cross_toolchain_before_fetching_compiler(self):
+        import build_game
+        with patch("build_game.sys.platform", "win32"), patch("build_game.llvm_mingw") as compiler:
+            with self.assertRaisesRegex(ValueError, "Windows"):
+                build_game.build(build_only=True, cmake_toolchain=self.toolchain)
+        compiler.assert_not_called()
+
+    def test_runner_path_accepts_explicit_directory_without_changing_native_defaults(self):
+        from build_game import runner_path
+        for platform, default, name in (("linux", "recomp-program", "recomp_program_runner"),
+                                         ("win32", "recomp-program-mingw", "recomp_program_runner.exe")):
+            with self.subTest(platform=platform), patch("build_game.sys.platform", platform):
+                self.assertEqual(runner_path(self.root), self.root / "build" / default / name)
+                self.assertEqual(runner_path(self.root, build_dir=self.root / "custom"),
+                                 self.root / "custom" / name)
+
+    def test_cli_passes_build_options_as_paths(self):
+        import build_game
+        directory = self.root / "custom"
+        argv = ["build_game.py", "--build-only", "--cmake-toolchain", str(self.toolchain),
+                "--build-dir", str(directory)]
+        with patch.object(sys, "argv", argv), patch("build_game.build") as build:
+            self.assertEqual(build_game.main(), 0)
+        self.assertEqual(build.call_args.kwargs["cmake_toolchain"], self.toolchain)
+        self.assertEqual(build.call_args.kwargs["build_dir"], directory)
 
 
 class BuildTests(unittest.TestCase):

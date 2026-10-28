@@ -87,10 +87,11 @@ def saved_settings():
     return options
 
 
-def open_launcher():
+def open_launcher(build_dir=None):
     """Linux builds its settings screen beside the runner (tools/launcher_sdl.cpp);
     macOS runs tools/launcher_macos.swift from launcher.sh instead."""
-    launcher = runner_path(ROOT).with_name("recomp_launcher")
+    runner = runner_path(ROOT) if build_dir is None else runner_path(ROOT, build_dir=build_dir)
+    launcher = runner.with_name("recomp_launcher")
     if not launcher.is_file():
         raise ValueError(f"{launcher} is missing; rebuild with ./build_game.sh")
     return subprocess.run([str(launcher), str(ROOT)]).returncode == 0
@@ -98,7 +99,7 @@ def open_launcher():
 
 def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), analog_polls=(),
         widescreen=None, msaa=None, smaa=None, resolution=None, story_finale=False,
-        skip_intro=False, unlock_all=True, surround=None):
+        skip_intro=False, unlock_all=True, surround=None, build_dir=None):
     if seconds is not None and seconds <= 0:
         raise ValueError("Probe duration must be positive")
     if msaa is not None and msaa not in (1, 2, 4, 8, 16, 32):
@@ -137,7 +138,7 @@ def run(seconds, start_polls=(), a_polls=(), isolated=False, buttons_polls=(), a
     if receipt["recipe"]["xbe_sha256"] != sha256(selected) or program_manifest(generated) != (
             receipt["manifest_sha256"], receipt["ebp_count"]):
         raise ValueError("Game or generated sources differ from the build receipt")
-    runner = runner_path(ROOT)
+    runner = runner_path(ROOT) if build_dir is None else runner_path(ROOT, build_dir=build_dir)
     if sha256(runner) != receipt["runner_sha256"]:
         raise ValueError("Runner differs from its successful build receipt")
     # A finale run clears Story, so it keeps its unlocks out of the player's saves.
@@ -232,9 +233,11 @@ if __name__ == "__main__":
                         help="Use the choices saved by the launcher in private/launcher.json")
     parser.add_argument("--launcher", action="store_true",
                         help="Open the Linux settings screen first, then play with its choices")
+    parser.add_argument("--build-dir", type=Path, help="Build tree relative to repository")
     args = parser.parse_args()
     try:
-        if args.launcher and not open_launcher():
+        if args.launcher and not (open_launcher() if args.build_dir is None
+                                  else open_launcher(build_dir=args.build_dir)):
             raise SystemExit(0)
         saved = saved_settings() if args.saved or args.launcher else {}
         def pick(name, value):
@@ -245,7 +248,7 @@ if __name__ == "__main__":
                              pick("msaa", args.msaa), pick("smaa", args.smaa),
                              pick("resolution", args.resolution), args.story_finale,
                              args.skip_intro or saved.get("skip_intro", False), args.unlock_all,
-                             pick("surround", args.surround)))
+                             pick("surround", args.surround), build_dir=args.build_dir))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print(f"Cannot run game: {error}", file=sys.stderr)
         raise SystemExit(1)

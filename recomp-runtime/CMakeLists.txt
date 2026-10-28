@@ -283,8 +283,10 @@ else()
 endif()
 add_executable(recomp_d3d_vblank_test d3d_vblank.cpp xapi_clock.cpp d3d_vblank_test.cpp)
 add_test(NAME recomp-runtime-d3d-vblank COMMAND recomp_d3d_vblank_test)
-add_test(NAME recomp-runtime-unpaced COMMAND "${CMAKE_COMMAND}" -E env
-    RECOMP_UNPACED=1 "$<TARGET_FILE:recomp_d3d_vblank_test>")
+# Refer to the executable target, not a raw path, so CTest inserts the
+# configured cross emulator. ENVIRONMENT also works on native builds.
+add_test(NAME recomp-runtime-unpaced COMMAND recomp_d3d_vblank_test)
+set_tests_properties(recomp-runtime-unpaced PROPERTIES ENVIRONMENT "RECOMP_UNPACED=1")
 add_executable(recomp_d3d_capture_test d3d_presenter_capture_test.cpp d3d_presenter_capture.cpp)
 add_test(NAME recomp-runtime-d3d-capture COMMAND recomp_d3d_capture_test)
 # The draw shader and constants are shared; the rest of the presenter is
@@ -486,10 +488,11 @@ if(RECOMP_PROGRAM_DIR)
     recomp_use_sdl3(recomp_program_runner)
     target_include_directories(recomp_program_runner PRIVATE "${_derived_dir}")
 
-    # Settings launcher for launcher.sh. SteamOS has no compiler, so it is built
-    # beside the runner rather than on first use like the macOS launcher.
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        add_executable(recomp_launcher ../tools/launcher_sdl.cpp)
-        recomp_use_sdl3(recomp_launcher)
-    endif()
+endif()
+
+# The settings UI contains no game code and can be cross-built and tested
+# before the authenticated game lift is available.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SDL3_FOUND)
+    add_executable(recomp_launcher ../tools/launcher_sdl.cpp)
+    recomp_use_sdl3(recomp_launcher)
 endif()

@@ -6,9 +6,12 @@ import unittest
 import json
 import os
 import subprocess
+import runpy
+import sys
 from unittest.mock import Mock, patch
 
-from run_game import prepare_disc, run, runner_path, saved_settings, seed_hdd_cache
+from extract_iso import sha256
+from run_game import open_launcher, prepare_disc, run, runner_path, saved_settings, seed_hdd_cache
 
 
 class DiscTests(unittest.TestCase):
@@ -262,6 +265,88 @@ foreach ($enabled in @($true, $false)) {
                 with self.assertRaisesRegex(ValueError, "Runner differs"):
                     run(1)
                 prepare.assert_not_called()
+
+
+class BuildDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.build_dir = Path("build/recomp-program-cross")
+        self.selected = self.root / "private/import/game.input"
+        self.selected.parent.mkdir(parents=True)
+        self.selected.write_bytes(b"synthetic input")
+        self.runner = self.root / self.build_dir / "recomp_program_runner"
+        self.runner.parent.mkdir(parents=True)
+        self.runner.write_bytes(b"synthetic runner")
+        self.launcher = self.runner.with_name("recomp_launcher")
+        self.launcher.write_bytes(b"synthetic launcher")
+        receipt = dict(recipe=dict(xbe_sha256=sha256(self.selected)),
+                       manifest_sha256="program-hash", ebp_count=0,
+                       runner_sha256=sha256(self.runner))
+        receipt_path = self.root / "private/program/receipt.json"
+        receipt_path.parent.mkdir()
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.resolve = Mock(return_value=self.runner)
+        for module in ("run_game", "build_game"):
+            for name, value in (("ROOT", self.root), ("runner_path", self.resolve)):
+                context = patch(f"{module}.{name}", value)
+                context.start()
+                self.addCleanup(context.stop)
+            for name, value in (("selected_xbe", self.selected),
+                                ("program_manifest", ("program-hash", 0))):
+                context = patch(f"{module}.{name}", return_value=value)
+                context.start()
+                self.addCleanup(context.stop)
+        self.execute = Mock(return_value=Mock(returncode=0))
+        context = patch("subprocess.run", self.execute)
+        context.start()
+        self.addCleanup(context.stop)
+
+    def test_run_uses_selected_build_directory_and_logs_verified_runner(self):
+        self.assertEqual(run(1, build_dir=self.build_dir), 0)
+        self.resolve.assert_called_once_with(self.root, build_dir=self.build_dir)
+        self.assertEqual(self.execute.call_args.args[0][0], str(self.runner))
+        log = next((self.root / "private/boot-logs").glob("*.log"))
+        self.assertIn(f"runner_sha256={sha256(self.runner)}", log.read_text())
+
+    def test_selected_build_directory_does_not_bypass_runner_receipt(self):
+        self.runner.write_bytes(b"changed runner")
+        with patch("run_game.prepare_disc") as prepare:
+            with self.assertRaisesRegex(ValueError, "Runner differs"):
+                run(1, build_dir=self.build_dir)
+            prepare.assert_not_called()
+        self.execute.assert_not_called()
+        self.resolve.assert_called_once_with(self.root, build_dir=self.build_dir)
+
+    def test_launcher_uses_selected_build_directory(self):
+        self.assertTrue(open_launcher(build_dir=self.build_dir))
+        self.resolve.assert_called_once_with(self.root, build_dir=self.build_dir)
+        self.execute.assert_called_once_with([str(self.launcher), str(self.root)])
+
+    def test_default_calls_preserve_runner_path_without_build_directory_keyword(self):
+        self.assertTrue(open_launcher())
+        self.assertEqual(run(1), 0)
+        self.assertEqual(self.resolve.call_count, 2)
+        for call in self.resolve.call_args_list:
+            self.assertEqual(call.args, (self.root,))
+            self.assertEqual(call.kwargs, {})
+
+    def test_cli_passes_build_directory_to_launcher_and_runner(self):
+        script = Path(__file__).with_name("run_game.py")
+        with patch.object(sys, "argv", [str(script), "--build-dir", str(self.build_dir),
+                                        "--launcher", "--play"]):
+            with self.assertRaises(SystemExit) as exited:
+                runpy.run_path(str(script), run_name="__main__")
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(self.resolve.call_count, 2)
+        for call in self.resolve.call_args_list:
+            self.assertEqual(call.args, (self.root,))
+            self.assertEqual(call.kwargs, {"build_dir": self.build_dir})
+        self.assertEqual(self.execute.call_args_list[0].args[0],
+                         [str(self.launcher), str(self.root)])
+        self.assertEqual(self.execute.call_args_list[1].args[0][0], str(self.runner))
+        self.assertIsNone(self.execute.call_args_list[1].kwargs["timeout"])
 
 
 if __name__ == "__main__":

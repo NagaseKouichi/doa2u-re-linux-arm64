@@ -58,6 +58,24 @@ jobs:
           RECOMP_TEST_SOFTWARE_VULKAN: "1"
         run: ctest --test-dir build/recomp-runtime --output-on-failure
 
+  runtime-tests-linux-arm64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated ARM64 cross environment
+        run: docker build --network=host -t doa2u-arm64-cross tools/arm64
+      - name: Cross compile and execute public ARM64 tests
+        run: |
+          docker run --rm -v "$PWD:/work" doa2u-arm64-cross sh -c '
+            python3 -m unittest discover -s tools -p "test_*.py" &&
+            RECOMP_QEMU_AARCH64=/usr/bin/qemu-aarch64 cmake \
+              -S recomp-runtime -B private/arm64-build/runtime -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE=/work/cmake/linux-aarch64.cmake \
+              -DRECOMP_FETCH_SDL3=ON &&
+            cmake --build private/arm64-build/runtime --parallel 4 &&
+            ctest --test-dir private/arm64-build/runtime --output-on-failure -E d3d-presenter'
+        # QEMU validates CPU/runtime semantics, not a handheld GPU or controller.
+
   runtime-tests-clang:
     runs-on: windows-latest
     steps:
