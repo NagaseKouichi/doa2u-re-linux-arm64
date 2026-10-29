@@ -210,6 +210,9 @@ class LauncherForm : Form
     readonly Timer padTimer = new Timer { Interval = 50 };
     int padHeld;
     DateTime padRepeat = DateTime.MaxValue;
+    // A held Down that entered a page waits for a fresh press before it changes a value.
+    bool downEntered;
+    bool downHeld;
     Point? drag;
     RectangleF[] tabs;
 
@@ -522,15 +525,19 @@ class LauncherForm : Form
         else Close();
     }
 
-    void Press(Keys key)
+    void Press(Keys key, bool repeat = false)
     {
         if (build == null) notice = null;
+        if (key == Keys.Down && !repeat) downEntered = false;
         switch (key)
         {
             case Keys.Left: MoveCursor(-1); break;
             case Keys.Right: MoveCursor(1); break;
             case Keys.Up: if (inPage) ChangeValue(1); break;
-            case Keys.Down: if (inPage) ChangeValue(-1); else if (Rows.Length > 0) Accept(); break;
+            case Keys.Down:
+                if (!inPage) { if (Rows.Length > 0) { Accept(); downEntered = true; } }
+                else if (!downEntered) ChangeValue(-1);
+                break;
             case Keys.Return: Accept(); break;
             case Keys.Escape: case Keys.Back: Back(); break;
         }
@@ -539,7 +546,10 @@ class LauncherForm : Form
 
     // A form without controls would otherwise spend the arrow keys on focus moves.
     protected override bool ProcessDialogKey(Keys keyData) { return false; }
-    protected override void OnKeyDown(KeyEventArgs e) { base.OnKeyDown(e); Press(e.KeyCode); }
+    // Windows repeats WM_KEYDOWN while a key is held; Down stays held until its WM_KEYUP or focus leaves.
+    protected override void OnKeyDown(KeyEventArgs e) { base.OnKeyDown(e); Press(e.KeyCode, e.KeyCode == Keys.Down && downHeld); if (e.KeyCode == Keys.Down) downHeld = true; }
+    protected override void OnKeyUp(KeyEventArgs e) { base.OnKeyUp(e); if (e.KeyCode == Keys.Down) downHeld = false; }
+    protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); downHeld = false; }
 
     // A dropped ISO becomes the game disc and selects Build.
     void UseDisc(string path)
@@ -581,7 +591,7 @@ class LauncherForm : Form
             bool pressed = (held & bit) == 0;
             if (!pressed && (bit > 0x8 || now < padRepeat)) continue;
             padRepeat = now.AddMilliseconds(pressed ? 400 : 120);
-            Press(PadKeys[i]);
+            Press(PadKeys[i], !pressed);
             return;
         }
     }
