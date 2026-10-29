@@ -71,6 +71,7 @@ class Manifest:
     allowed_private_paths: frozenset[str]
     forbidden_extensions: frozenset[str]
     byte_literal_exceptions: frozenset[str]
+    binary_files: dict[str, str]
     max_file_bytes: int
     gitlinks: tuple[Gitlink, ...]
 
@@ -94,6 +95,10 @@ def load_manifest(path: Path = MANIFEST_PATH) -> Manifest:
     for gitlink in gitlinks:
         if not re.fullmatch(r"[0-9a-f]{40}", gitlink.commit):
             raise ExportError(f"invalid gitlink commit for {gitlink.path}")
+    # Binary-file pins follow committed DOA3 tools/public_export.py at 6c782d5.
+    pins = data.get("binary_files", [])
+    if len({entry["path"] for entry in pins}) != len(pins):
+        raise ExportError("duplicate binary_files path")
     return Manifest(
         include=tuple(data["include"]),
         quarantine=tuple(data["quarantine"]),
@@ -102,6 +107,9 @@ def load_manifest(path: Path = MANIFEST_PATH) -> Manifest:
             extension.lower() for extension in data["forbidden_extensions"]
         ),
         byte_literal_exceptions=frozenset(exception_hashes),
+        binary_files={
+            entry["path"]: entry["sha256"].lower() for entry in pins
+        },
         max_file_bytes=int(data["max_file_bytes"]),
         gitlinks=gitlinks,
     )
@@ -231,7 +239,8 @@ def line_number(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def scan_file(path: str, data: bytes, manifest: Manifest) -> list[str]:
+def policy_errors(path: str, data: bytes, manifest: Manifest) -> list[str]:
+    """Path and size rules that apply to every included file, binary or text."""
     errors: list[str] = []
     suffix = PurePosixPath(path).suffix.lower()
 
@@ -243,6 +252,11 @@ def scan_file(path: str, data: bytes, manifest: Manifest) -> list[str]:
         errors.append(
             f"{path}: {len(data)} bytes exceeds {manifest.max_file_bytes}"
         )
+    return errors
+
+
+def scan_file(path: str, data: bytes, manifest: Manifest) -> list[str]:
+    errors = policy_errors(path, data, manifest)
     if b"\0" in data:
         errors.append(f"{path}: binary NUL byte detected")
         return errors
@@ -305,6 +319,14 @@ def verify_entries(
             continue
 
         included += 1
+        # A reviewed binary file is pinned to its exact bytes instead of
+        # being scanned as text; path and size rules still apply.
+        if path in manifest.binary_files:
+            errors.extend(policy_errors(path, entries[path], manifest))
+            digest = hashlib.sha256(entries[path]).hexdigest()
+            if digest != manifest.binary_files[path]:
+                errors.append(f"{path}: binary file does not match its reviewed sha256 {digest}")
+            continue
         if require_public_tree and b"\r" in entries[path]:
             errors.append(f"{path}: public text must use LF line endings")
         errors.extend(scan_file(path, entries[path], manifest))
@@ -390,7 +412,8 @@ def export_tree(destination: Path) -> None:
     for path in included_paths:
         target = destination / Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(normalize_public_bytes(entries[path]))
+        target.write_bytes(entries[path] if path in manifest.binary_files
+                           else normalize_public_bytes(entries[path]))
 
     for gitlink in manifest.gitlinks:
         target = destination / Path(gitlink.path)

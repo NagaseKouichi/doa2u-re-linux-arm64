@@ -1,4 +1,4 @@
-Dead or Alive 2 Ultimate native Linux port - 0.1.7 Alpha (experimental)
+Dead or Alive 2 Ultimate native Linux port - 0.1.8 Alpha (experimental)
 =======================================================================
 
 This is an early, experimental build. It contains no game files. You
@@ -9,7 +9,7 @@ What you need (x86-64 Linux; on the Steam Deck, see below):
 
 - A C++17 compiler, CMake 3.20 or newer, Ninja, Git, Python 3.12 or newer
   with its venv module, the shaderc library and a Vulkan driver. On
-  Ubuntu 24.04 or Debian:
+  Ubuntu 24.04 or Debian 13:
 
       sudo apt install build-essential cmake ninja-build git python3-venv \
           libshaderc1 libvulkan1 mesa-vulkan-drivers
@@ -22,14 +22,13 @@ What you need (x86-64 Linux; on the Steam Deck, see below):
           libegl-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
           libudev-dev libdbus-1-dev
 
-- extract-xiso. Build it once:
-
-      git clone https://github.com/XboxDev/extract-xiso.git
-      cmake -S extract-xiso -B extract-xiso/build
-      cmake --build extract-xiso/build
-
 - An internet connection for the first build, your Disc 2 as an Xbox ISO,
   and about 6 GB of free space.
+
+The build downloads a pinned, checksummed extract-xiso to read the ISO. It
+needs glibc 2.34 or newer; elsewhere, build extract-xiso from
+github.com/XboxDev/extract-xiso and add --extractor /path/to/extract-xiso
+to step 3.
 
 Build (once, about 15 to 25 minutes):
 
@@ -41,7 +40,7 @@ Build (once, about 15 to 25 minutes):
 
 3. Build from your ISO. The ISO is only read:
 
-      ./build_game.sh /path/to/disc2.iso --extractor /path/to/extract-xiso/build/extract-xiso
+      ./build_game.sh /path/to/disc2.iso
 
 4. Wait for "Build complete". The build is checked against the exact
    program the developers tested; any difference stops the build.

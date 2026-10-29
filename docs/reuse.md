@@ -9,11 +9,18 @@ notices remain with that source. DOA2U's verified native widescreen branches
 use XC_VIDEO's widescreen bit without DOA3's extra letterbox flag. Shared-depth
 full-frame effects now retain depth under scaling/MSAA instead of inheriting
 the sister presenter's depth-disabled fallback.
-The settings window adapts committed DOA3's native WinForms launcher at
-`26672b6`, keeping resolution, MSAA, SMAA and aspect choices and their private
-preferences. Audio controls and sister-specific game options are omitted.
-DOA2U extends the MSAA choices through 32x and uses its authenticated Python
-launcher. Resolution presets keep the same height/480 scaling contract.
+The Windows launcher follows committed DOA3 `tools/launcher.cs` at
+`6c782d5`: one C# file, built by the in-box .NET Framework 4 compiler into
+`Launcher.exe` (build, settings, play) and `DOA2U.exe` (play only). It keeps
+DOA3's Horizon Bar menu, controller, keyboard and mouse input, and its
+AI-generated beach backdrop (`tools/launcher-background.jpg`). The export
+checker's hash-pinned `binary_files` come from DOA3's
+`tools/public_export.py` at the same commit; path, extension and size rules
+still apply to pinned files.
+Choices stay in `private/launcher.json`. DOA3's volume, free camera and
+swimsuit pages are omitted; DOA2U adds surround and intro-movie pages, extends
+MSAA through 32x, and runs its authenticated Python tools for the build and
+play. Resolution presets keep the same height/480 scaling contract.
 
 The macOS and Linux ports take the host layer of committed DOA3 at `48d05e9`
 (its PR #7), which came from DOAXBV's macOS and Linux ports: `win32_compat`,
