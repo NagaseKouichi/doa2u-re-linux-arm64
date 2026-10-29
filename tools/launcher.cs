@@ -7,7 +7,7 @@
 //     opens the build page with that disc chosen.
 //   DOA2U.exe (PLAY_ONLY) plays with the saved settings.
 // Adapted from committed DOA3 tools/launcher.cs at 6c782d5: its Horizon Bar menu
-// over the generated beach (tools/launcher-background.jpg); no retail art is used.
+// over the generated castle-bridge backdrop (tools/launcher-background.jpg); no retail art is used.
 // The build and the game run through tools\build_game.py and tools\run_game.py,
 // so the saved settings and the build receipt are checked in one place.
 // Keep to C# 5: the in-box compiler knows nothing newer.
@@ -308,7 +308,7 @@ class LauncherForm : Form
     int ColW { get { return (W - 2 * Side) / Math.Max(Rows.Length, 1); } }
     static string Verb(string action) { return action == "build" ? "BUILD" : action == "default" ? "RESET" : action == "back" ? "BACK" : "CHOOSE"; }
 
-    // The generated beach (tools/launcher-background.jpg, embedded by package_test.py) between letterbox bars.
+    // The generated backdrop (tools/launcher-background.jpg, embedded by package_test.py) between letterbox bars.
     // A private\launcher-background.png or .jpg replaces it; it is read at run time so private art never enters the exe.
     void DrawBackground()
     {

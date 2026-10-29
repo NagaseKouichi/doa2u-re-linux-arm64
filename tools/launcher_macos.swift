@@ -82,7 +82,7 @@ final class LauncherView: NSView {
     var tabs: [NSRect] = []
     let built = FileManager.default.fileExists(atPath: root.appendingPathComponent("build/recomp-program/recomp_program_runner").path)
     var onPlay: () -> Void = {}
-    // A private/launcher-background.png or .jpg replaces the generated beach.
+    // A private/launcher-background.png or .jpg replaces the generated backdrop.
     let background = ["private/launcher-background.png", "private/launcher-background.jpg", "tools/launcher-background.jpg"]
         .lazy.compactMap { NSImage(contentsOf: root.appendingPathComponent($0)) }.first
 

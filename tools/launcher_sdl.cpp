@@ -309,7 +309,7 @@ int main(int argc, char **argv)
     SDL_SetRenderLogicalPresentation(launcher.renderer, kWidth, kHeight, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
     SDL_SetRenderVSync(launcher.renderer, 1);
     SDL_SetRenderDrawBlendMode(launcher.renderer, SDL_BLENDMODE_BLEND);
-    // A private/launcher-background.png replaces the generated beach; without either the launcher works on a plain fill.
+    // A private/launcher-background.png replaces the generated backdrop; without either the launcher works on a plain fill.
     for (const char *path : {"/private/launcher-background.png", "/tools/launcher-background.png"}) {
         if (SDL_Surface *picture = SDL_LoadPNG((root + path).c_str())) {
             launcher.background = SDL_CreateTextureFromSurface(launcher.renderer, picture);
