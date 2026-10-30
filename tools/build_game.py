@@ -218,6 +218,11 @@ def build(build_only=False, lift_only=False, iso=None, disassemble=False, extrac
             raise ValueError("CMake toolchain file is missing")
         if build_dir is None:
             build_dir = ROOT / "build/recomp-program-cross"
+    # SDL3's Wayland header step hands the build path to /bin/sh unquoted; spaces survive, these do not.
+    if (sys.platform.startswith("linux") and not lift_only
+            and set(str(ROOT)) & set("()&;|<>`$'\"\\*?[]!#~{}\n")):
+        raise ValueError(f"Rename or move {ROOT} to a folder without ( ) or other shell symbols"
+                         " in its path, such as DOA2U-0.1.8-Alpha, and run the build again")
     if iso is not None:
         import_disc(iso, extractor)
         if shutil.which("cmake") is None:
