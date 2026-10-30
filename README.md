@@ -61,7 +61,9 @@ keeps running.
   keyboard for player 1.
 - **Launcher.** `Launcher.exe` picks resolution, anti-aliasing, widescreen, an
   optional intro-movie skip, 5.1 surround and the unlock setting, and remembers them. `DOA2U.exe` plays
-  with the same choices.
+  with the same choices. On release ZIPs after 0.1.10, the settings launcher on
+  each platform can check GitHub for a newer release and install it from its
+  **UPDATE** page; **Check At Start** turns the start-up check off.
 - **Saves.** Your profile and unlocks save to `private\play-disc`; every
   character and costume starts unlocked unless you choose **Earn** on the
   launcher's **GAMEPLAY** page. The game's soft reset
