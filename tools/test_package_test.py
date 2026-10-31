@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import unittest
+from pathlib import Path
 
 from package_test import PLATFORM_FILES, git, lifter_shipped, shipped
 
 
 class ReleaseSelectionTest(unittest.TestCase):
+    @unittest.skipUnless((Path(__file__).resolve().parents[1] / ".git").exists(),
+                         "Tracked-file inventory requires a Git checkout")
     def test_platform_lists_name_tracked_files(self):
         # A renamed backend would otherwise ship to every platform.
         tracked = set(git("ls-files").decode().splitlines())
