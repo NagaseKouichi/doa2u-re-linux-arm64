@@ -8,6 +8,24 @@ launcher can be built without a disc; the game runner still requires your own
 supported USA Disc 2 and the upstream authenticated lift. No game-derived
 source or assets are distributed.
 
+## ARM64 release updates
+
+On Linux AArch64, `tools/update.py` checks the latest **non-prerelease** GitHub
+Release in `NagaseKouichi/doa2u-re-linux-arm64`, never the upstream Linux ZIP.
+Assets must end in `-Linux-ARM64.zip`; missing target assets fail closed.
+Other host platforms retain the upstream update source.
+
+The installed root must contain a `VERSION` text file, for example `0.1.12`.
+Source checkouts without it are not updated. A release ZIP must have one top
+folder and include its next VERSION. Release tags must have a newer numeric
+version; this updater does not compare `-arm64.N` revision suffixes.
+
+Public releases contain source/build tools only, not game-derived runners or
+receipts. After updating public files, build from your own disc and deploy the
+runner **together with** `private/program/receipt.json`. The updater preserves
+existing private files, including saves and settings; it does not perform that
+private runtime/receipt update. Do not publish a private full-game archive.
+
 ## Isolated cross environment
 
 From the repository root, with Docker available:

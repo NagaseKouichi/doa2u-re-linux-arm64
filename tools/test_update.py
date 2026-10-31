@@ -18,13 +18,31 @@ def archive(files):
 
 
 class UpdateTest(unittest.TestCase):
-    def test_arm64_install_refuses_upstream_update_before_network(self):
+    def test_arm64_uses_fork_release_endpoint(self):
+        response = io.StringIO('{"tag_name":"v0.1.13","assets":[]}')
         with mock.patch.object(update.sys, "platform", "linux"), \
                 mock.patch("platform.machine", return_value="aarch64"), \
-                mock.patch.object(update, "installed", return_value="0.1.8"), \
-                mock.patch.object(update, "newer") as newer:
-            self.assertEqual(update.main(["install"]), 1)
-            newer.assert_not_called()
+                mock.patch.object(update, "fetch", return_value=response) as fetch:
+            self.assertEqual(update.newer("0.1.12")["tag_name"], "v0.1.13")
+            fetch.assert_called_once_with("https://api.github.com/repos/NagaseKouichi/doa2u-re-linux-arm64/releases/latest")
+
+    def test_arm64_only_selects_explicit_arm64_zip(self):
+        assets = [{"name": "DOA2U-0.1.13-Linux.zip"},
+                  {"name": "DOA2U-0.1.13-Linux-ARM64.zip"}]
+        for machine in ("aarch64", "arm64"):
+            with mock.patch.object(update.sys, "platform", "linux"), \
+                    mock.patch("platform.machine", return_value=machine):
+                self.assertEqual(update.pick_asset(assets), assets[1])
+                with self.assertRaises(ValueError):
+                    update.pick_asset(assets[:1])
+
+    def test_arm64_check_is_enabled(self):
+        with mock.patch.object(update.sys, "platform", "linux"), \
+                mock.patch("platform.machine", return_value="aarch64"), \
+                mock.patch.object(update, "installed", return_value="0.1.12"), \
+                mock.patch.object(update, "newer", return_value=None) as newer:
+            self.assertEqual(update.main(["check"]), 0)
+            newer.assert_called_once_with("0.1.12")
 
     def test_versions_compare_numerically(self):
         self.assertGreater(update.number("v0.1.10"), update.number("0.1.9-Alpha"))

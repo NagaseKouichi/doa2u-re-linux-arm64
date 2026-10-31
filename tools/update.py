@@ -21,6 +21,10 @@ OTHER_PLATFORMS = ("-macOS.zip", "-Linux.zip")
 SUFFIX = {"win32": "", "darwin": "-macOS"}.get(sys.platform, "-Linux")
 
 
+def linux_arm64():
+    return sys.platform.startswith("linux") and platform.machine().lower() in ("aarch64", "arm64")
+
+
 def number(text):
     found = re.search(r"\d+(\.\d+)+", text)
     return tuple(int(part) for part in found.group().split(".")) if found else (0,)
@@ -37,16 +41,19 @@ def fetch(url):
 
 def pick_asset(assets):
     """This platform's ZIP among a release's assets."""
+    suffix = "-Linux-ARM64" if linux_arm64() else SUFFIX
     for asset in assets:
         name = asset["name"]
-        if name.endswith(SUFFIX + ".zip") and (SUFFIX or not name.endswith(OTHER_PLATFORMS)):
+        if name.endswith(suffix + ".zip") and (suffix or not name.endswith(OTHER_PLATFORMS)):
             return asset
     raise ValueError("The release has no ZIP for this platform")
 
 
 def newer(current):
     """The release (tag_name, assets) when it is newer than the installed version, else None."""
-    with fetch(LATEST) as response:
+    endpoint = ("https://api.github.com/repos/NagaseKouichi/doa2u-re-linux-arm64/releases/latest"
+                if linux_arm64() else LATEST)
+    with fetch(endpoint) as response:
         release = json.load(response)
     return release if number(release["tag_name"]) > number(current) else None
 
@@ -102,11 +109,6 @@ def unpack(archive):
 def main(argv):
     if len(argv) != 1 or argv[0] not in ("check", "install"):
         sys.exit("usage: update.py check|install")
-    # Upstream Linux releases do not preserve this fork's cross-build routing.
-    # Do not overwrite an ARM64 installation with that platform-generic ZIP.
-    if sys.platform.startswith("linux") and platform.machine().lower() in ("aarch64", "arm64"):
-        print("Automatic upstream updates are disabled on Linux ARM64; update from the ARM64 build manually")
-        return 1
     for old in ROOT.glob("*.exe.old"):
         try:
             old.unlink()
